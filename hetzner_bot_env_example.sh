@@ -1,0 +1,4 @@
+TELEGRAM_TOKEN=your_telegram_bot_token_here
+HETZNER_API_TOKEN=your_hetzner_api_token_here
+ADMIN_ID=your_telegram_user_id_here
+DEBUG_MODE=false
