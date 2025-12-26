@@ -23,13 +23,15 @@ A Telegram bot to manage Hetzner Cloud servers with traffic monitoring and autom
 ### 1. Install Python dependencies
 
 ```bash
-apt update
-apt install -y python3 python3-pip git
-git clone https://github.com/phoseinq/Hetzner-Server-Usage.git
-cd Hetzner-Server-Usage
-python3 -m venv venv
-source venv/bin/activate
-pip3 install -r requirements.txt
+apt update && \
+apt install -y python3 python3-pip python3-venv git && \
+cd ~ && \
+git clone https://github.com/phoseinq/Hetzner-Server-Usage.git && \
+cd Hetzner-Server-Usage && \
+python3 -m venv venv && \
+source venv/bin/activate && \
+pip install --upgrade pip && \
+pip install -r requirements.txt
 ```
 
 ### 2. Configure environment variables
