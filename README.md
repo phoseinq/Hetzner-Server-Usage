@@ -23,6 +23,8 @@ A Telegram bot to manage Hetzner Cloud servers with traffic monitoring and autom
 ### 1. Install Python dependencies
 
 ```bash
+python3 -m venv venv
+source venv/bin/activate
 pip3 install -r requirements.txt
 ```
 
