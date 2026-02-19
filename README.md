@@ -309,10 +309,4 @@ python3 main.py
 
 ---
 
-### 📄 لایسنس
-
-MIT — فایل [LICENSE](LICENSE) رو ببین.
-
----
-
 **Made with ❤️**
