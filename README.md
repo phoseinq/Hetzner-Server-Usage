@@ -1,3 +1,5 @@
+<div align="center">
+
 # 🖥️ Hetzner Server Manager Bot
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
@@ -5,9 +7,12 @@
 [![Hetzner](https://img.shields.io/badge/Hetzner-Cloud-D50C2D?style=for-the-badge&logo=hetzner&logoColor=white)](https://hetzner.cloud)
 [![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
 
-**Manage your Hetzner Cloud servers directly from Telegram** 
+**Manage your Hetzner Cloud servers directly from Telegram**  
+**مدیریت سرورهای Hetzner Cloud مستقیم از تلگرام**
 
 [English](#english) | [فارسی](#فارسی)
+
+</div>
 
 ---
 
