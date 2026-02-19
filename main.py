@@ -76,7 +76,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(traffic_monitor, "cron", hour=12, minute=0, args=[app.bot])
+    scheduler.add_job(traffic_monitor, "interval", hours=1, args=[app.bot])
     scheduler.start()
 
     logging.info("🚀 Bot started successfully")
