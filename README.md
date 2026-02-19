@@ -7,7 +7,7 @@
 [![Hetzner](https://img.shields.io/badge/Hetzner-Cloud-D50C2D?style=for-the-badge&logo=hetzner&logoColor=white)](https://hetzner.cloud)
 [![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
 
-**Manage your Hetzner Cloud servers directly from Telegram** 
+**Manage your Hetzner Cloud servers directly from Telegram**
 
 [English](#english) | [فارسی](#فارسی)
 
@@ -113,13 +113,15 @@ When you tap **Reset Traffic**, the bot:
 
 ---
 
-### ⚠️ Daily Monitoring
+### ⚠️ Traffic Monitoring
 
-The bot checks traffic every day at **12:00 PM**:
+The bot checks traffic **every hour** automatically:
 
 | Usage | Alert |
 |---|---|
-| 98% | 🚨 Critical alert |
+| 75% | ⚠️ One-time warning — resets when usage drops below 75% |
+| 98% | 🚨 Critical alert — once per day |
+| 100%+ | 🔥 Overage alert — once per day |
 
 ---
 
@@ -262,13 +264,15 @@ python3 main.py
 
 ---
 
-### ⚠️ مانیتور روزانه
+### ⚠️ مانیتور ترافیک
 
-ربات هر روز ساعت **۱۲:۰۰** ترافیک رو چک می‌کنه:
+ربات **هر ساعت** ترافیک رو چک می‌کنه:
 
 | مصرف | هشدار |
 |---|---|
-| ۹۸٪ | 🚨 هشدار بحرانی |
+| ۷۵٪ | ⚠️ یه بار نوتیف — وقتی برگشت زیر ۷۵٪ ریست میشه |
+| ۹۸٪ | 🚨 هشدار بحرانی — یه بار در روز |
+| ۱۰۰٪+ | 🔥 هشدار اضافه مصرف — یه بار در روز |
 
 ---
 
@@ -302,6 +306,12 @@ python3 main.py
 **ریست ترافیک خطا میده؟**
 - مطمئن شو اکانت هتزنرت پلن بالاتری در دسترس داره
 - بررسی کن توکن API دسترسی **Read & Write** داشته باشه
+
+---
+
+### 📄 لایسنس
+
+MIT — فایل [LICENSE](LICENSE) رو ببین.
 
 ---
 
