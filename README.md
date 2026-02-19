@@ -1,148 +1,183 @@
-# Hetzner Server Manager Telegram Bot
+# 🖥️ Hetzner Server Manager Bot
 
-A Telegram bot to manage Hetzner Cloud servers with traffic monitoring and automatic reset capabilities.
+> A Telegram bot to monitor and manage your Hetzner Cloud servers — traffic, power, SSH console, and more.
 
-## Features
+---
 
-- 📊 Real-time server monitoring
-- 🔄 Automated traffic reset by upgrading/downgrading server plans
-- ⚠️ Daily traffic alerts at 75% and 98% usage
-- 🔴 Power management (on/off)
-- 📈 Traffic usage visualization
-- 🔐 Admin-only access control
+## ✨ Features
 
-## Requirements
+| Feature | Description |
+|---|---|
+| 📊 Traffic Monitoring | Real-time usage per server |
+| ♻️ Reset Traffic | Auto upgrade/downgrade to reset counter |
+| ⚠️ Daily Alerts | Warnings at 75% and 98% usage |
+| 🔴 Power Control | Turn servers on/off |
+| 💻 SSH Console | Run commands directly from Telegram |
+| 🔑 Reset Password | Generate new root password via API |
+| 💸 Cost Report | Monthly cost & overage breakdown |
+| 🔐 Admin Only | Only you can use the bot |
 
-- Ubuntu 22.04 or higher
-- Python 3.10+
-- Telegram Bot Token
-- Hetzner Cloud API Token
+---
 
-## Installation
+## 🚀 Quick Setup
 
-### 1. Install Python dependencies
+### 1 — Install
 
 ```bash
-apt update && \
-apt install -y python3 python3-pip python3-venv git && \
-cd ~ && \
-git clone https://github.com/phoseinq/Hetzner-Server-Usage.git && \
-cd Hetzner-Server-Usage && \
-python3 -m venv venv && \
-source venv/bin/activate && \
-pip install --upgrade pip && \
+apt update && apt install -y python3 python3-pip python3-venv git
+
+git clone https://github.com/phoseinq/Hetzner-Server-Usage.git
+cd Hetzner-Server-Usage
+
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Configure environment variables
-
-Create a `.env` file in the project root:
+### 2 — Configure
 
 ```bash
 cp .env.example .env
+nano .env
 ```
 
-Edit `.env` and fill in your credentials:
+Fill in your credentials:
 
-```
-TELEGRAM_TOKEN=your_bot_token_from_botfather
-HETZNER_API_TOKEN=your_hetzner_api_token
-ADMIN_ID=your_telegram_user_id
+```env
+TELEGRAM_TOKEN=        # from @BotFather
+HETZNER_API_TOKEN=     # from Hetzner Cloud Console
+ADMIN_ID=              # your Telegram user ID (get it from @userinfobot)
 DEBUG_MODE=false
 ```
 
-### 3. Get your Telegram User ID
-
-Send a message to [@userinfobot](https://t.me/userinfobot) on Telegram to get your user ID.
-
-### 4. Get Hetzner API Token
-
-1. Log in to [Hetzner Cloud Console](https://console.hetzner.cloud/)
-2. Go to your project
-3. Navigate to Security → API Tokens
-4. Generate a new token with Read & Write permissions
-
-## Running the Bot
+### 3 — Run
 
 ```bash
+source venv/bin/activate
 python3 main.py
 ```
 
-The bot will start and connect to Telegram using long polling (no webhook required).
+---
 
-## Project Structure
+## 💻 SSH Console Usage
+
+1. Open any server from the panel
+2. Tap **💻 SSH Console**
+3. Enter port, username, and password
+4. Send any command — output appears in chat
+5. Tap **🔌 Disconnect** when done
+
+> Commands like `apt`, `pip`, `systemctl` run in clean mode — no noisy progress bars.
+
+---
+
+## 📁 Project Structure
 
 ```
-.
-├── main.py              # Entry point
-├── config.py            # Configuration management
-├── hetzner_api.py       # Hetzner Cloud API client
-├── handlers.py          # Telegram message handlers
-├── server_manager.py    # Traffic reset logic
-├── monitor.py           # Daily traffic monitoring
-├── utils.py             # Helper functions
-├── requirements.txt     # Python dependencies
-├── .env.example         # Environment template
-└── server_data.csv      # Traffic alert tracking (auto-generated)
+├── main.py             Entry point
+├── config.py           Config & env loader
+├── handlers.py         Telegram button handlers
+├── shell_handler.py    SSH console logic
+├── hetzner_api.py      Hetzner Cloud API client
+├── server_manager.py   Traffic reset logic
+├── monitor.py          Daily traffic monitor
+├── utils.py            Helper functions
+└── .env.example        Environment template
 ```
 
-## Usage
+---
 
-1. Start the bot: `/start`
-2. Click "Server Management Panel"
-3. Select a server to view details
-4. Use "Reset Traffic" to trigger the upgrade/downgrade cycle
+---
 
-## Traffic Reset Process
+# 🖥️ ربات مدیریت سرور هتزنر
 
-When you click "Reset Traffic":
+> ربات تلگرامی برای مانیتور و مدیریت سرورهای Hetzner Cloud — ترافیک، پاور، کنسول SSH و بیشتر.
 
-1. ⚙️ Server is powered off
-2. 💾 Current plan is saved
-3. 🔼 Server is upgraded to next available plan
-4. ⏳ Wait for upgrade completion
-5. 🟢 Server is powered on
-6. 🔽 Server is downgraded back to original plan
-7. ✅ Process complete - traffic counter reset
+---
 
-## Daily Monitoring
+## ✨ امکانات
 
-The bot automatically checks traffic daily at 12:00 PM:
+| امکان | توضیح |
+|---|---|
+| 📊 مانیتور ترافیک | نمایش مصرف لحظه‌ای هر سرور |
+| ♻️ ریست ترافیک | آپگرید/داونگرید خودکار برای ریست کانتر |
+| ⚠️ هشدار روزانه | اطلاع‌رسانی در ۷۵٪ و ۹۸٪ مصرف |
+| 🔴 کنترل پاور | روشن و خاموش کردن سرور |
+| 💻 کنسول SSH | اجرای دستور مستقیم از تلگرام |
+| 🔑 ریست پسورد | تولید پسورد root جدید از طریق API |
+| 💸 گزارش هزینه | خلاصه هزینه ماهانه و اضافه مصرف |
+| 🔐 فقط ادمین | فقط شما به ربات دسترسی دارید |
 
-- **75% usage**: Warning notification
-- **98% usage**: Critical alert
+---
 
-## Security Notes
+## 🚀 راه‌اندازی سریع
 
-- Only the configured ADMIN_ID can use the bot
-- API tokens are stored in `.env` (never commit this file)
-- The bot uses HTTPS for all Hetzner API calls
-- Rate limiting protection is built-in
-
-## Troubleshooting
-
-### Bot doesn't respond
-- Check if `ADMIN_ID` matches your Telegram user ID
-- Verify `TELEGRAM_TOKEN` is correct
-
-### API errors
-- Ensure `HETZNER_API_TOKEN` has Read & Write permissions
-- Check if you have available server types for upgrade
-
-### Upgrade fails
-- Verify there are higher-tier server types available
-- Check Hetzner account has sufficient quota
-
-## Logs
-
-Enable debug mode for detailed logs:
+### مرحله ۱ — نصب
 
 ```bash
-DEBUG_MODE=true
+apt update && apt install -y python3 python3-pip python3-venv git
+
+git clone https://github.com/phoseinq/Hetzner-Server-Usage.git
+cd Hetzner-Server-Usage
+
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 ```
 
-Logs will show API calls, traffic checks, and process status.
+### مرحله ۲ — تنظیمات
 
-## License
+```bash
+cp .env.example .env
+nano .env
+```
 
-Private use only.
+مقادیر زیر رو پر کن:
+
+```env
+TELEGRAM_TOKEN=        # از @BotFather بگیر
+HETZNER_API_TOKEN=     # از پنل Hetzner Cloud بگیر
+ADMIN_ID=              # آیدی تلگرامت (از @userinfobot بگیر)
+DEBUG_MODE=false
+```
+
+### مرحله ۳ — اجرا
+
+```bash
+source venv/bin/activate
+python3 main.py
+```
+
+---
+
+## 💻 نحوه استفاده از کنسول SSH
+
+1. یک سرور رو از پنل باز کن
+2. روی **💻 SSH Console** بزن
+3. پورت، یوزرنیم و پسورد رو وارد کن
+4. هر دستوری بفرست — خروجی توی چت نمایش داده میشه
+5. وقتی کارت تموم شد **🔌 Disconnect** بزن
+
+> دستوراتی مثل `apt`، `pip` و `systemctl` بدون خروجی اضافه اجرا میشن.
+
+---
+
+## 📁 ساختار پروژه
+
+```
+├── main.py             نقطه شروع
+├── config.py           مدیریت تنظیمات
+├── handlers.py         هندلر دکمه‌های تلگرام
+├── shell_handler.py    لاجیک کنسول SSH
+├── hetzner_api.py      کلاینت API هتزنر
+├── server_manager.py   لاجیک ریست ترافیک
+├── monitor.py          مانیتور روزانه ترافیک
+├── utils.py            توابع کمکی
+└── .env.example        نمونه فایل تنظیمات
+```
+
+---
+
+## 📄 License
+
+MIT
