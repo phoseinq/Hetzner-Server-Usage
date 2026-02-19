@@ -5,8 +5,7 @@
 [![Hetzner](https://img.shields.io/badge/Hetzner-Cloud-D50C2D?style=for-the-badge&logo=hetzner&logoColor=white)](https://hetzner.cloud)
 [![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
 
-**Manage your Hetzner Cloud servers directly from Telegram**  
-**مدیریت سرورهای Hetzner Cloud مستقیم از تلگرام**
+**Manage your Hetzner Cloud servers directly from Telegram** 
 
 [English](#english) | [فارسی](#فارسی)
 
