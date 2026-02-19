@@ -119,7 +119,6 @@ The bot checks traffic every day at **12:00 PM**:
 
 | Usage | Alert |
 |---|---|
-| 75% | ⚠️ Warning notification |
 | 98% | 🚨 Critical alert |
 
 ---
@@ -269,7 +268,6 @@ python3 main.py
 
 | مصرف | هشدار |
 |---|---|
-| ۷۵٪ | ⚠️ اطلاع‌رسانی warning |
 | ۹۸٪ | 🚨 هشدار بحرانی |
 
 ---
