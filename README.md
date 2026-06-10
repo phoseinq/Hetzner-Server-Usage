@@ -62,8 +62,10 @@ bash install.sh
 ```
 
 `install.sh` installs system packages, creates the virtualenv, installs the
-requirements, and registers the bot as a **systemd service** so it survives
-SSH disconnects and reboots.
+requirements, registers the bot as a **systemd service** (so it survives
+SSH disconnects and reboots) and installs the `hetzner` management command.
+It is **idempotent** — safe to re-run anytime; an existing `.env` is never
+touched.
 
 **Step 2 — Configure**
 
@@ -86,8 +88,8 @@ DEBUG_MODE=false
 **Step 3 — Run**
 
 ```bash
-systemctl start hetzner-bot
-journalctl -u hetzner-bot -f      # follow the logs
+hetzner start
+hetzner logs      # follow the logs (Ctrl+C to exit)
 ```
 
 <details>
@@ -261,8 +263,10 @@ bash install.sh
 ```
 
 اسکریپت `install.sh` پکیج‌های سیستمی رو نصب می‌کنه، virtualenv می‌سازه،
-نیازمندی‌ها رو نصب می‌کنه و ربات رو به‌صورت **سرویس systemd** ثبت می‌کنه —
-یعنی با قطع شدن SSH یا ریبوت سرور، ربات نمی‌میره.
+نیازمندی‌ها رو نصب می‌کنه، ربات رو به‌صورت **سرویس systemd** ثبت می‌کنه
+(یعنی با قطع شدن SSH یا ریبوت سرور، ربات نمی‌میره) و دستور مدیریتی
+`hetzner` رو هم نصب می‌کنه. اجرای دوباره‌ش **کاملاً امنه** — فایل `.env`
+موجود هیچ‌وقت دست نمی‌خوره.
 
 **مرحله ۲ — تنظیمات**
 
@@ -285,8 +289,8 @@ DEBUG_MODE=false
 **مرحله ۳ — اجرا**
 
 ```bash
-systemctl start hetzner-bot
-journalctl -u hetzner-bot -f      # دیدن لاگ‌ها
+hetzner start
+hetzner logs      # دیدن لاگ زنده (خروج با Ctrl+C)
 ```
 
 <details>
