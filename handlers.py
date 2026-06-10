@@ -203,7 +203,10 @@ async def show_server_detail(query, context, server_id, refresh=False):
     )
 
     keyboard = [
-        [InlineKeyboardButton("♻️ Reset Traffic", callback_data=f"reset_{server_id}")],
+        [
+            InlineKeyboardButton("♻️ Reset Traffic", callback_data=f"reset_{server_id}"),
+            InlineKeyboardButton("📸 Take Snapshot", callback_data=f"snapcreate_{server_id}"),
+        ],
         [
             InlineKeyboardButton(
                 "🔴 Power OFF" if status == "running" else "🟢 Power ON",
@@ -523,6 +526,7 @@ async def create_snapshot(query, context, server_id):
     result = await hetzner_api.create_snapshot(server_id, description)
 
     keyboard = [[InlineKeyboardButton("📸 View Snapshots", callback_data="snapshots")],
+                [InlineKeyboardButton("🖥 Back to Server", callback_data=f"server_{server_id}")],
                 [InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")]]
     if result:
         await query.edit_message_text(
