@@ -1,0 +1,12 @@
+# secrets
+.env
+
+# runtime data
+server_data.csv
+overage_history.json
+monitor_state.json
+
+# python
+venv/
+__pycache__/
+*.pyc

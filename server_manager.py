@@ -1,6 +1,8 @@
 import asyncio
 import logging
+from config import Config
 from hetzner_api import hetzner_api
+from overage_tracker import overage_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +47,16 @@ async def reset_server_traffic(server_id, progress_callback=None):
             return False, logs
         
         await add_log("🔼", f"Upgrade plan selected: {upgrade_type}")
-        
+
+        # the reset wipes the traffic counter, so persist this cycle's
+        # overage cost before touching the server
+        traffic_tb = server.get('outgoing_traffic', 0) / (1024 ** 4)
+        overage = max(0, traffic_tb - Config.TRAFFIC_LIMIT_TB) * 1.0
+        if overage > 0:
+            overage_tracker.update_live_overage(server_id, overage)
+            overage_tracker.commit_overage(server_id)
+            await add_log("💾", f"Overage cost €{overage:.2f} saved to cost history")
+
         if current_status == "running":
             await add_log("🔴", "Shutting down server...")
             await hetzner_api.power_off(server_id)

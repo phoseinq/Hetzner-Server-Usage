@@ -45,24 +45,23 @@ A Telegram bot that lets you monitor and manage all your Hetzner Cloud servers f
 
 ### 🚀 Quick Setup
 
-**Step 1 — Install**
+**Step 1 — Install (as root)**
 
 ```bash
-apt update && apt install -y python3 python3-pip python3-venv git
-
-git clone https://github.com/phoseinq/Hetzner-Server-Usage.git
-cd Hetzner-Server-Usage
-
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+apt update && apt install -y git
+git clone https://github.com/phoseinq/Hetzner-Server-Usage.git /opt/Hetzner-Server-Usage
+cd /opt/Hetzner-Server-Usage
+bash install.sh
 ```
+
+`install.sh` installs system packages, creates the virtualenv, installs the
+requirements, and registers the bot as a **systemd service** so it survives
+SSH disconnects and reboots.
 
 **Step 2 — Configure**
 
 ```bash
-cp .env.example .env
-nano .env
+nano /opt/Hetzner-Server-Usage/.env
 ```
 
 Fill in your credentials:
@@ -74,12 +73,30 @@ ADMIN_ID=              # your Telegram user ID (get it from @userinfobot)
 DEBUG_MODE=false
 ```
 
+> The bot verifies `HETZNER_API_TOKEN` against the Hetzner API at startup
+> and exits with a clear error if the token is invalid.
+
 **Step 3 — Run**
 
 ```bash
+systemctl start hetzner-bot
+journalctl -u hetzner-bot -f      # follow the logs
+```
+
+<details>
+<summary>Manual run without systemd (not recommended — dies when SSH closes)</summary>
+
+```bash
+cd /opt/Hetzner-Server-Usage
 source venv/bin/activate
 python3 main.py
 ```
+
+The bot **must** be started from the repo directory: its data files
+(`server_data.csv`, `overage_history.json`, `monitor_state.json`) use
+relative paths.
+
+</details>
 
 ---
 
@@ -111,6 +128,10 @@ When you tap **Reset Traffic**, the bot:
 | 4 | Downgrades back to the original plan |
 | 5 | ✅ Traffic counter is reset |
 
+> Before the reset starts, any overage cost from the current cycle is saved
+> to the cost history (`overage_history.json`) — resetting no longer wipes
+> it from the **Cost Report**.
+
 ---
 
 ### ⚠️ Traffic Monitoring
@@ -128,16 +149,18 @@ The bot checks traffic **every hour** automatically:
 ### 📁 Project Structure
 
 ```
-├── main.py             Entry point
-├── config.py           Config & env loader
-├── handlers.py         Telegram button handlers
-├── shell_handler.py    SSH console logic
-├── hetzner_api.py      Hetzner Cloud API client
-├── server_manager.py   Traffic reset logic
-├── monitor.py          Daily traffic monitor
-├── overage_tracker.py  Cost history tracker
-├── utils.py            Helper functions
-└── .env.example        Environment template
+├── main.py              Entry point
+├── config.py            Config & env loader
+├── handlers.py          Telegram button handlers
+├── shell_handler.py     SSH console logic
+├── hetzner_api.py       Hetzner Cloud API client
+├── server_manager.py    Traffic reset logic
+├── monitor.py           Hourly traffic monitor
+├── overage_tracker.py   Cost history tracker
+├── utils.py             Helper functions
+├── install.sh           One-command installer (systemd)
+├── hetzner-bot.service  systemd unit template
+└── .env.example         Environment template
 ```
 
 ---
@@ -196,24 +219,23 @@ MIT — see [LICENSE](LICENSE) for details.
 
 ### 🚀 راه‌اندازی سریع
 
-**مرحله ۱ — نصب**
+**مرحله ۱ — نصب (با root)**
 
 ```bash
-apt update && apt install -y python3 python3-pip python3-venv git
-
-git clone https://github.com/phoseinq/Hetzner-Server-Usage.git
-cd Hetzner-Server-Usage
-
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+apt update && apt install -y git
+git clone https://github.com/phoseinq/Hetzner-Server-Usage.git /opt/Hetzner-Server-Usage
+cd /opt/Hetzner-Server-Usage
+bash install.sh
 ```
+
+اسکریپت `install.sh` پکیج‌های سیستمی رو نصب می‌کنه، virtualenv می‌سازه،
+نیازمندی‌ها رو نصب می‌کنه و ربات رو به‌صورت **سرویس systemd** ثبت می‌کنه —
+یعنی با قطع شدن SSH یا ریبوت سرور، ربات نمی‌میره.
 
 **مرحله ۲ — تنظیمات**
 
 ```bash
-cp .env.example .env
-nano .env
+nano /opt/Hetzner-Server-Usage/.env
 ```
 
 مقادیر زیر رو پر کن:
@@ -225,12 +247,30 @@ ADMIN_ID=              # آیدی تلگرامت (از @userinfobot بگیر)
 DEBUG_MODE=false
 ```
 
+> ربات موقع استارت `HETZNER_API_TOKEN` رو با API هتزنر چک می‌کنه و اگه
+> توکن نامعتبر باشه با پیام واضح خارج میشه.
+
 **مرحله ۳ — اجرا**
 
 ```bash
+systemctl start hetzner-bot
+journalctl -u hetzner-bot -f      # دیدن لاگ‌ها
+```
+
+<details>
+<summary>اجرای دستی بدون systemd (پیشنهاد نمیشه — با بستن SSH می‌میره)</summary>
+
+```bash
+cd /opt/Hetzner-Server-Usage
 source venv/bin/activate
 python3 main.py
 ```
+
+ربات **حتماً** باید از پوشه ریپو اجرا بشه: فایل‌های داده‌اش
+(`server_data.csv`، `overage_history.json`، `monitor_state.json`)
+مسیر نسبی دارن.
+
+</details>
 
 ---
 
@@ -262,6 +302,10 @@ python3 main.py
 | ۴ | به پلن اصلی برمی‌گرده |
 | ۵ | ✅ کانتر ترافیک ریست میشه |
 
+> قبل از شروع ریست، هزینه اضافه‌مصرف این دوره توی تاریخچه هزینه
+> (`overage_history.json`) ذخیره میشه — دیگه با ریست، عدد **Cost Report**
+> از بین نمیره.
+
 ---
 
 ### ⚠️ مانیتور ترافیک
@@ -279,16 +323,18 @@ python3 main.py
 ### 📁 ساختار پروژه
 
 ```
-├── main.py             نقطه شروع
-├── config.py           مدیریت تنظیمات
-├── handlers.py         هندلر دکمه‌های تلگرام
-├── shell_handler.py    لاجیک کنسول SSH
-├── hetzner_api.py      کلاینت API هتزنر
-├── server_manager.py   لاجیک ریست ترافیک
-├── monitor.py          مانیتور روزانه ترافیک
-├── overage_tracker.py  ردیاب تاریخچه هزینه
-├── utils.py            توابع کمکی
-└── .env.example        نمونه فایل تنظیمات
+├── main.py              نقطه شروع
+├── config.py            مدیریت تنظیمات
+├── handlers.py          هندلر دکمه‌های تلگرام
+├── shell_handler.py     لاجیک کنسول SSH
+├── hetzner_api.py       کلاینت API هتزنر
+├── server_manager.py    لاجیک ریست ترافیک
+├── monitor.py           مانیتور ساعتی ترافیک
+├── overage_tracker.py   ردیاب تاریخچه هزینه
+├── utils.py             توابع کمکی
+├── install.sh           نصب یک‌مرحله‌ای (systemd)
+├── hetzner-bot.service  قالب سرویس systemd
+└── .env.example         نمونه فایل تنظیمات
 ```
 
 ---

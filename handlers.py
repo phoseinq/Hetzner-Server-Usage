@@ -256,7 +256,7 @@ async def show_overage_cost(query, context):
         await query.edit_message_text("⚠️ No servers found or API error occurred.")
         return
 
-    total_server_cost = monthly_overage = total_usage = 0
+    total_server_cost = 0
     server_details = []
 
     for s in servers:
@@ -266,12 +266,13 @@ async def show_overage_cost(query, context):
         sp = float(prices[0].get("price_monthly", {}).get("gross", 0)) if prices else 0
         total_server_cost += sp
         ov = max(0, tb - Config.TRAFFIC_LIMIT_TB) * 1.0
-        monthly_overage += ov
-        total_usage += sp + ov
-        if ov > 0:
-            server_details.append(f"• {name}: €{ov:.2f}")
+        overage_tracker.update_live_overage(s["id"], ov)
+        ov_month = overage_tracker.get_server_month_overage(s["id"])
+        if ov_month > 0:
+            server_details.append(f"• {name}: €{ov_month:.2f}")
 
-    overage_tracker.record_monthly_overage(monthly_overage)
+    monthly_overage = overage_tracker.get_current_month_overage()
+    total_usage = total_server_cost + monthly_overage
     total_historic = overage_tracker.get_total_overage()
     monthly_breakdown = overage_tracker.get_monthly_breakdown()
 

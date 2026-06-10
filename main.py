@@ -1,4 +1,7 @@
 import logging
+import sys
+import urllib.error
+import urllib.request
 import warnings
 from telegram.warnings import PTBUserWarning
 from telegram.ext import (
@@ -25,8 +28,28 @@ def setup_logging():
     logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=level)
 
 
+def check_hetzner_token():
+    req = urllib.request.Request(
+        f"{Config.HETZNER_API_BASE}/servers",
+        headers={"Authorization": f"Bearer {Config.HETZNER_API_TOKEN}"},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=15)
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            sys.exit(
+                "❌ HETZNER_API_TOKEN is invalid (Hetzner API returned 401).\n"
+                "Create a token in Hetzner Cloud Console → Security → API Tokens "
+                "and put it in .env, then restart the bot."
+            )
+        logging.warning(f"Hetzner API returned HTTP {e.code} during token check")
+    except Exception as e:
+        logging.warning(f"Could not verify Hetzner token (network issue?): {e}")
+
+
 def main():
     setup_logging()
+    check_hetzner_token()
     warnings.filterwarnings("ignore", category=PTBUserWarning)
     app = Application.builder().token(Config.TELEGRAM_TOKEN).build()
 
