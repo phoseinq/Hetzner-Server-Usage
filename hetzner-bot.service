@@ -8,6 +8,8 @@ Type=simple
 # DATA_FILE / overage_history.json are relative paths, so the bot must
 # run from the repo directory. install.sh replaces __DIR__ automatically.
 WorkingDirectory=__DIR__
+# All times shown by the bot use this timezone (change via: hetzner tz)
+Environment=TZ=Asia/Tehran
 ExecStart=__DIR__/venv/bin/python main.py
 Restart=always
 RestartSec=10

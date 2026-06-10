@@ -69,8 +69,13 @@ do_update() {
     echo "⬇️  Pulling latest version..."
     git pull
     ./venv/bin/pip install --quiet -r requirements.txt
-    # keep the service unit in sync with the repo template
+    # keep the service unit in sync with the repo template,
+    # preserving the timezone the user picked with `hetzner tz`
+    cur_tz=$(grep -E '^Environment=TZ=' "/etc/systemd/system/$SERVICE.service" 2>/dev/null | cut -d= -f3)
     sed "s|__DIR__|$DIR|g" hetzner-bot.service > "/etc/systemd/system/$SERVICE.service"
+    if [ -n "$cur_tz" ]; then
+        sed -i "s|^Environment=TZ=.*|Environment=TZ=$cur_tz|" "/etc/systemd/system/$SERVICE.service"
+    fi
     install -m 755 hetzner-bot.sh /usr/local/bin/hetzner
     rm -f /usr/local/bin/hetzner-bot
     systemctl daemon-reload
@@ -119,6 +124,36 @@ do_env() {
     case "$a" in [Nn]*) ;; *) systemctl restart "$SERVICE"; echo "Restarted." ;; esac
 }
 
+do_tz() {
+    need_root
+    local unit="/etc/systemd/system/$SERVICE.service"
+    if [ ! -f "$unit" ]; then
+        echo -e "${RED}Bot service is not installed yet.${PLAIN}"
+        return
+    fi
+    local cur tz
+    cur=$(grep -E '^Environment=TZ=' "$unit" | cut -d= -f3)
+    echo -e "Current bot timezone: ${CYAN}${cur:-system default}${PLAIN}"
+    if [ -n "$1" ]; then
+        tz="$1"
+    else
+        read -r -p "New timezone [Asia/Tehran]: " tz
+        tz="${tz:-Asia/Tehran}"
+    fi
+    if [ ! -f "/usr/share/zoneinfo/$tz" ]; then
+        echo -e "${RED}Unknown timezone: $tz${PLAIN} (e.g. Asia/Tehran, Europe/Berlin, UTC)"
+        return
+    fi
+    if grep -qE '^Environment=TZ=' "$unit"; then
+        sed -i "s|^Environment=TZ=.*|Environment=TZ=$tz|" "$unit"
+    else
+        sed -i "/^\[Service\]/a Environment=TZ=$tz" "$unit"
+    fi
+    systemctl daemon-reload
+    systemctl restart "$SERVICE"
+    echo -e "${GREEN}✅ Bot timezone set to $tz — all times in the bot now use it.${PLAIN}"
+}
+
 case "$1" in
     install)          do_install;   exit 0 ;;
     update)           do_update;    exit 0 ;;
@@ -129,9 +164,10 @@ case "$1" in
     status)           do_status;    exit 0 ;;
     logs)             do_logs;      exit 0 ;;
     env)              do_env;       exit 0 ;;
+    tz|timezone)      do_tz "$2";   exit 0 ;;
     "") ;;  # no argument: open the interactive menu
     *)
-        echo "Usage: hetzner [install|update|uninstall|start|stop|restart|status|logs|env]"
+        echo "Usage: hetzner [install|update|uninstall|start|stop|restart|status|logs|env|tz]"
         exit 1
         ;;
 esac
@@ -142,7 +178,8 @@ while true; do
     echo "  2) ⬆️  Update               7) 📊 Status"
     echo "  3) 🗑  Uninstall            8) 📜 Logs (live)"
     echo "  4) ▶️  Start                9) ⚙️  Edit .env"
-    echo "  5) ⏹  Stop                 0) 🚪 Exit"
+    echo "  5) ⏹  Stop                10) 🕒 Timezone"
+    echo "                             0) 🚪 Exit"
     echo
     read -r -p "  Select an option: " choice
     echo
@@ -156,6 +193,7 @@ while true; do
         7) do_status ;;
         8) do_logs ;;
         9) do_env ;;
+        10) do_tz ;;
         0) exit 0 ;;
         *) echo -e "${RED}Invalid option.${PLAIN}" ;;
     esac

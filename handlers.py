@@ -113,6 +113,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delete_snapshot_confirm(query, context, int(data.split("_")[1]))
     elif data.startswith("snap_"):
         await show_snapshot_detail(query, context, int(data.split("_")[1]))
+    elif data.startswith("srvsnap_"):
+        await show_server_snapshots(query, context, int(data.split("_")[1]))
     elif data == "fips":
         await show_ip_list(query, context, "fip")
     elif data == "fip_new":
@@ -310,7 +312,7 @@ async def show_server_detail(query, context, server_id, refresh=False):
     keyboard = [
         [
             InlineKeyboardButton("♻️ Reset Traffic", callback_data=f"reset_{server_id}"),
-            InlineKeyboardButton("📸 Take Snapshot", callback_data=f"snapcreate_{server_id}"),
+            InlineKeyboardButton("📸 Snapshots", callback_data=f"srvsnap_{server_id}"),
         ],
         [
             InlineKeyboardButton("🔧 Rebuild OS", callback_data=f"rebuild_{server_id}"),
@@ -550,10 +552,11 @@ async def show_snapshots(query, context):
         )
         for img in images:
             s_emoji = "✅" if img.get("status") == "available" else "⏳"
+            lock = "🔒 " if img.get("protection", {}).get("delete") else ""
             size = img.get("image_size") or 0
             label = img.get("description") or img.get("name") or str(img["id"])
             keyboard.append([InlineKeyboardButton(
-                f"{s_emoji} {label} | {size:.1f} GB",
+                f"{s_emoji} {lock}{label} | {size:.1f} GB",
                 callback_data=f"snap_{img['id']}",
             )])
 
@@ -582,6 +585,7 @@ async def show_snapshot_detail(query, context, image_id):
     created = img.get("created", "")[:16].replace("T", " ")
     source = img.get("created_from", {}) or {}
 
+    protected = bool(img.get("protection", {}).get("delete"))
     text = (
         f"📸 *Snapshot Detail*\n\n"
         f"🏷 Name: `{img.get('description') or img.get('name') or image_id}`\n"
@@ -590,6 +594,7 @@ async def show_snapshot_detail(query, context, image_id):
         f"💾 Size: `{size:.2f} GB`\n"
         f"💰 Cost: `€{cost:.2f}/month`\n"
         f"{s_emoji} Status: `{status.upper()}`\n"
+        f"🔒 Protection: `{'ON' if protected else 'OFF'}`\n"
         f"📅 Created: `{created}`\n"
     )
     keyboard = [
@@ -602,6 +607,8 @@ async def show_snapshot_detail(query, context, image_id):
 async def delete_snapshot_confirm(query, context, image_id):
     img = await hetzner_api.get_image(image_id)
     label = (img.get("description") or img.get("name") or str(image_id)) if img else str(image_id)
+    protected = bool(img and img.get("protection", {}).get("delete"))
+    note = "\n🔒 This snapshot is *delete-protected* — protection will be removed first.\n" if protected else ""
     keyboard = [
         [
             InlineKeyboardButton("✅ Yes, delete it", callback_data=f"snapdel_confirm_{image_id}"),
@@ -610,7 +617,7 @@ async def delete_snapshot_confirm(query, context, image_id):
     ]
     await query.edit_message_text(
         f"🗑 *Delete Snapshot*\n\n"
-        f"Snapshot: `{label}`\n\n"
+        f"Snapshot: `{label}`\n{note}\n"
         f"⚠️ This cannot be undone. Are you sure?",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
@@ -619,6 +626,18 @@ async def delete_snapshot_confirm(query, context, image_id):
 
 async def delete_snapshot(query, context, image_id):
     await query.edit_message_text("🗑 Deleting snapshot...")
+    img = await hetzner_api.get_image(image_id)
+    if img and img.get("protection", {}).get("delete"):
+        # protected snapshots cannot be deleted; lift the protection first
+        unlocked = await hetzner_api.change_image_protection(image_id, False)
+        if unlocked is None:
+            await query.edit_message_text(
+                "❌ Could not remove the delete protection. Check the logs.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Back to Snapshots", callback_data="snapshots")]]
+                ),
+            )
+            return
     result = await hetzner_api.delete_image(image_id)
     keyboard = [[InlineKeyboardButton("⬅️ Back to Snapshots", callback_data="snapshots")]]
     if result is not None:
@@ -631,6 +650,45 @@ async def delete_snapshot(query, context, image_id):
             "❌ Failed to delete snapshot. Check the logs and try again.",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+
+
+async def show_server_snapshots(query, context, server_id):
+    images, server, pricing = await asyncio.gather(
+        hetzner_api.list_images(),
+        hetzner_api.get_server(server_id),
+        hetzner_api.get_pricing(),
+    )
+    if not server:
+        await query.edit_message_text("⚠️ Server not found or API error.")
+        return
+    per_gb = _image_price_per_gb(pricing)
+    own = [i for i in images if (i.get("created_from") or {}).get("id") == server_id]
+
+    text = f"📸 *Snapshots — `{server.get('name')}`*\n\n"
+    keyboard = [[InlineKeyboardButton("➕ Take Snapshot", callback_data=f"snapcreate_{server_id}")]]
+
+    if not own:
+        text += "This server has no snapshots yet.\n"
+    else:
+        total_size = sum(i.get("image_size") or 0 for i in own)
+        text += (
+            f"Total: {len(own)} | {total_size:.1f} GB | €{total_size * per_gb:.2f}/month\n\n"
+            f"Tap a snapshot to manage it:"
+        )
+        for img in own:
+            s_emoji = "✅" if img.get("status") == "available" else "⏳"
+            lock = "🔒 " if img.get("protection", {}).get("delete") else ""
+            size = img.get("image_size") or 0
+            label = img.get("description") or img.get("name") or str(img["id"])
+            keyboard.append([InlineKeyboardButton(
+                f"{s_emoji} {lock}{label} | {size:.1f} GB",
+                callback_data=f"snap_{img['id']}",
+            )])
+
+    text += f"\n\n🕓 Updated: `{datetime.now().strftime('%H:%M:%S')}`"
+    keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"srvsnap_{server_id}")])
+    keyboard.append([InlineKeyboardButton("⬅️ Back to Server", callback_data=f"server_{server_id}")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def snapshot_pick_server(query, context):
@@ -664,7 +722,7 @@ async def create_snapshot(query, context, server_id):
     await query.edit_message_text(f"📸 Creating snapshot of `{name}`...", parse_mode="Markdown")
     result = await hetzner_api.create_snapshot(server_id, description)
 
-    keyboard = [[InlineKeyboardButton("📸 View Snapshots", callback_data="snapshots")],
+    keyboard = [[InlineKeyboardButton("📸 View Server Snapshots", callback_data=f"srvsnap_{server_id}")],
                 [InlineKeyboardButton("🖥 Back to Server", callback_data=f"server_{server_id}")],
                 [InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")]]
     if result:

@@ -119,6 +119,7 @@ hetzner status       # service status
 hetzner logs         # live logs (Ctrl+C to exit)
 hetzner start | stop | restart
 hetzner env          # edit .env, then restart
+hetzner tz           # set the bot's timezone (default Asia/Tehran)
 hetzner uninstall    # remove service (asks before deleting data)
 ```
 
@@ -317,6 +318,7 @@ hetzner status       # وضعیت سرویس
 hetzner logs         # لاگ زنده (خروج با Ctrl+C)
 hetzner start | stop | restart
 hetzner env          # ویرایش .env و ری‌استارت
+hetzner tz           # تنظیم تایم‌زون ربات (پیش‌فرض Asia/Tehran)
 hetzner uninstall    # حذف سرویس (قبل از حذف دیتا می‌پرسه)
 ```
 

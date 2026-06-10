@@ -145,6 +145,11 @@ class HetznerAPI:
         # returns {} on success (204), None on failure
         return await self._request('DELETE', f'/images/{image_id}')
 
+    async def change_image_protection(self, image_id, delete_protect):
+        return await self._request('POST', f'/images/{image_id}/actions/change_protection', {
+            'delete': delete_protect,
+        })
+
     async def list_floating_ips(self):
         result = await self._request('GET', '/floating_ips?per_page=50')
         return result.get('floating_ips', []) if result else []
