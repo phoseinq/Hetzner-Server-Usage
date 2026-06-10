@@ -1,4 +1,6 @@
+import calendar
 import logging
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from config import Config
@@ -260,39 +262,51 @@ async def show_overage_cost(query, context):
     server_details = []
 
     for s in servers:
-        tb   = s.get("outgoing_traffic", 0) / (1024 ** 4)
-        name = s.get("name", "Unnamed")
+        tb    = s.get("outgoing_traffic", 0) / (1024 ** 4)
+        name  = s.get("name", "Unnamed")
+        stype = s.get("server_type", {}).get("name", "?")
         prices = s.get("server_type", {}).get("prices", [])
         sp = float(prices[0].get("price_monthly", {}).get("gross", 0)) if prices else 0
         total_server_cost += sp
         ov = max(0, tb - Config.TRAFFIC_LIMIT_TB) * 1.0
         overage_tracker.update_live_overage(s["id"], ov)
         ov_month = overage_tracker.get_server_month_overage(s["id"])
+        line = f"• `{name}` ({stype}): €{sp:.2f} | {format_traffic(s.get('outgoing_traffic', 0))}"
         if ov_month > 0:
-            server_details.append(f"• {name}: €{ov_month:.2f}")
+            line += f" | ⚠️ €{ov_month:.2f} overage"
+        server_details.append(line)
 
     monthly_overage = overage_tracker.get_current_month_overage()
     total_usage = total_server_cost + monthly_overage
     total_historic = overage_tracker.get_total_overage()
     monthly_breakdown = overage_tracker.get_monthly_breakdown()
 
+    now = datetime.now()
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    projected_overage = monthly_overage / now.day * days_in_month
+
     text = (
         f"💸 *COST REPORT*\n\n"
-        f"📦 *Server Costs (This Month)*\n€{total_server_cost:.2f}\n\n"
-        f"📊 *Overage Costs (This Month)*\n€{monthly_overage:.2f}\n\n"
+        f"📦 *Servers (This Month)*\n" + "\n".join(server_details) + "\n\n"
+        f"📊 *Summary*\n"
+        f"📦 Server costs: €{total_server_cost:.2f}\n"
+        f"📈 Overage: €{monthly_overage:.2f}\n"
+        f"💰 Total: €{total_usage:.2f}\n\n"
     )
-    if server_details:
-        text += "*Overage Breakdown:*\n" + "\n".join(server_details) + "\n\n"
-    text += (
-        f"📈 *Total Usage*\n€{total_usage:.2f}\n\n"
-        f"🔴 *Total Overage Loss (All Time)*\n€{total_historic:.2f}\n"
-    )
+    if monthly_overage > 0:
+        text += (
+            f"🔮 *Projected Month-End Overage*\n"
+            f"~€{projected_overage:.2f} at the current usage rate\n\n"
+        )
+    text += f"🔴 *Total Overage Loss (All Time)*\n€{total_historic:.2f}\n"
     if monthly_breakdown and len(monthly_breakdown) > 1:
         text += "\n*Monthly History:*\n"
         for month, cost in monthly_breakdown[:6]:
             text += f"• {month}: €{cost:.2f}\n"
+    text += f"\n🕓 Updated: `{now.strftime('%H:%M:%S')}`"
 
     keyboard = [
+        [InlineKeyboardButton("🔄 Refresh", callback_data="overage_cost")],
         [InlineKeyboardButton("📊 Server Management", callback_data="list_servers")],
         [InlineKeyboardButton("⬅️ Back", callback_data="start_menu")],
     ]
