@@ -84,7 +84,7 @@ async def show_server_list(query, context, page=0):
         await query.edit_message_text("⚠️ No servers found or API error occurred.")
         return
 
-    items_per_page = 5
+    items_per_page = 10
     total_pages = (len(servers) - 1) // items_per_page + 1
     page_servers = servers[page * items_per_page:(page + 1) * items_per_page]
 
