@@ -30,8 +30,13 @@ A Telegram bot that lets you monitor and manage all your Hetzner Cloud servers f
 - 💻 **SSH Console** — Run commands directly from Telegram chat
 - 🔑 **Reset Password** — Generate a new root password via Hetzner API
 - 📸 **Snapshots** — Take, list and delete server snapshots from the bot
-- 🌐 **Floating & Primary IPs** — Create and delete IPs in bulk with multi-select
-- 💸 **Cost Report** — Per-server costs, snapshots, floating/primary IPs, persisted overage history & month-end projection
+- 🔧 **Rebuild OS** — Reinstall any OS image (filtered by server architecture)
+- ⚖️ **Change Plan** — Upgrade/downgrade across CPU families (Intel/AMD/ARM/Dedicated); only plans available in the server's datacenter are offered
+- 💽 **Volumes** — Create, attach, detach and delete volumes per server
+- 💾 **Backups** — Enable/disable Hetzner backups per server
+- 🌐 **Floating & Primary IPs** — Create and delete IPs in bulk with multi-select; attach/detach floating IPs to servers
+- 💸 **Cost Report** — Per-server costs, snapshots, volumes, backups, floating/primary IPs, persisted overage history & month-end projection
+- 🛡 **Rate-limit friendly** — Requests are throttled and cached so the bot stays far below Hetzner's API limits
 - 🔐 **Admin Only** — Only you can access the bot
 
 ---
@@ -206,8 +211,13 @@ MIT — see [LICENSE](LICENSE) for details.
 - 💻 **کنسول SSH** — اجرای دستور مستقیم از چت تلگرام
 - 🔑 **ریست پسورد** — تولید پسورد root جدید از طریق API هتزنر
 - 📸 **اسنپ‌شات** — گرفتن، مشاهده و حذف اسنپ‌شات سرورها از داخل ربات
-- 🌐 **IP های Floating و Primary** — ساخت و حذف گروهی IP ها با انتخاب چندتایی
-- 💸 **گزارش هزینه** — هزینه هر سرور، اسنپ‌شات‌ها، IP های Floating/Primary، تاریخچه ماندگار اضافه‌مصرف و پیش‌بینی آخر ماه
+- 🔧 **ریبیلد سیستم‌عامل** — نصب مجدد هر ایمیج (فیلترشده بر اساس معماری سرور)
+- ⚖️ **تغییر پلن** — ارتقا/داونگرید بین خانواده‌های CPU (اینتل/AMD/ARM/اختصاصی)؛ فقط پلن‌های موجود در دیتاسنتر همون سرور نشون داده میشه
+- 💽 **ولوم** — ساخت، اتصال، جداسازی و حذف ولوم برای هر سرور
+- 💾 **بکاپ** — روشن/خاموش کردن بکاپ هتزنر برای هر سرور
+- 🌐 **IP های Floating و Primary** — ساخت و حذف گروهی IP ها با انتخاب چندتایی؛ اتصال/قطع Floating IP به سرورها
+- 💸 **گزارش هزینه** — هزینه هر سرور، اسنپ‌شات‌ها، ولوم‌ها، بکاپ‌ها، IP های Floating/Primary، تاریخچه ماندگار اضافه‌مصرف و پیش‌بینی آخر ماه
+- 🛡 **رعایت محدودیت API** — درخواست‌ها فاصله‌گذاری و کش میشن تا همیشه خیلی پایین‌تر از سقف هتزنر بمونیم
 - 🔐 **فقط ادمین** — فقط شما به ربات دسترسی دارید
 
 ---

@@ -1,9 +1,25 @@
 import aiohttp
 import asyncio
 import logging
+import time
 from config import Config
 
 logger = logging.getLogger(__name__)
+
+# Hetzner allows 3600 requests/hour (refill 1/s). We stay far below that:
+# requests are spaced out, GET responses are cached briefly, and slow-moving
+# data (pricing, locations, server types, OS images) is cached for an hour.
+MIN_REQUEST_INTERVAL = 0.4          # seconds between any two API requests
+DEFAULT_GET_TTL = 10                # seconds; short cache for lists/details
+LONG_TTL_PREFIXES = {
+    '/pricing': 3600,
+    '/locations': 3600,
+    '/server_types': 3600,
+    '/datacenters': 600,
+    '/images?type=system': 3600,
+}
+RATE_LIMIT_SOFT_FLOOR = 200         # slow down when fewer requests remain
+
 
 class HetznerAPI:
     def __init__(self):
@@ -12,10 +28,40 @@ class HetznerAPI:
             'Authorization': f'Bearer {Config.HETZNER_API_TOKEN}',
             'Content-Type': 'application/json'
         }
+        self._throttle_lock = asyncio.Lock()
+        self._last_request = 0.0
+        self._cache = {}
 
-    async def _request(self, method, endpoint, data=None, retry=3):
+    def _cache_get(self, endpoint):
+        hit = self._cache.get(endpoint)
+        if hit and hit[0] > time.monotonic():
+            return hit[1]
+        return None
+
+    def _cache_set(self, endpoint, result):
+        ttl = DEFAULT_GET_TTL
+        for prefix, long_ttl in LONG_TTL_PREFIXES.items():
+            if endpoint.startswith(prefix):
+                ttl = long_ttl
+                break
+        self._cache[endpoint] = (time.monotonic() + ttl, result)
+
+    async def _throttle(self):
+        async with self._throttle_lock:
+            wait = MIN_REQUEST_INTERVAL - (time.monotonic() - self._last_request)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_request = time.monotonic()
+
+    async def _request(self, method, endpoint, data=None, retry=3, fresh=False):
+        if method == 'GET' and not fresh:
+            cached = self._cache_get(endpoint)
+            if cached is not None:
+                return cached
+
         url = f"{self.base_url}{endpoint}"
         for attempt in range(retry):
+            await self._throttle()
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.request(
@@ -35,7 +81,17 @@ class HetznerAPI:
                         if response.status >= 400:
                             logger.error(f"API Error {response.status}: {result}")
                             return None
-                        return result if result is not None else {}
+                        result = result if result is not None else {}
+                        if method == 'GET':
+                            self._cache_set(endpoint, result)
+                        else:
+                            # state changed: drop every cached response
+                            self._cache.clear()
+                        remaining = response.headers.get('RateLimit-Remaining')
+                        if remaining and int(float(remaining)) < RATE_LIMIT_SOFT_FLOOR:
+                            logger.warning(f"Rate limit low ({remaining} left), slowing down...")
+                            await asyncio.sleep(3)
+                        return result
             except Exception as e:
                 logger.error(f"Request failed (attempt {attempt + 1}): {e}")
                 if attempt < retry - 1:
@@ -48,8 +104,8 @@ class HetznerAPI:
         result = await self._request('GET', '/servers')
         return result.get('servers', []) if result else []
 
-    async def get_server(self, server_id):
-        result = await self._request('GET', f'/servers/{server_id}')
+    async def get_server(self, server_id, fresh=False):
+        result = await self._request('GET', f'/servers/{server_id}', fresh=fresh)
         return result.get('server') if result else None
 
     async def power_off(self, server_id):
@@ -130,13 +186,63 @@ class HetznerAPI:
         result = await self._request('GET', '/datacenters?per_page=50')
         return result.get('datacenters', []) if result else []
 
+    async def get_datacenter(self, dc_name):
+        result = await self._request('GET', f'/datacenters?name={dc_name}')
+        dcs = result.get('datacenters', []) if result else []
+        return dcs[0] if dcs else None
+
+    async def rebuild_server(self, server_id, image):
+        return await self._request('POST', f'/servers/{server_id}/actions/rebuild', {
+            'image': image,
+        })
+
+    async def enable_backup(self, server_id):
+        return await self._request('POST', f'/servers/{server_id}/actions/enable_backup')
+
+    async def disable_backup(self, server_id):
+        return await self._request('POST', f'/servers/{server_id}/actions/disable_backup')
+
+    async def assign_floating_ip(self, fip_id, server_id):
+        return await self._request('POST', f'/floating_ips/{fip_id}/actions/assign', {
+            'server': server_id,
+        })
+
+    async def unassign_floating_ip(self, fip_id):
+        return await self._request('POST', f'/floating_ips/{fip_id}/actions/unassign')
+
+    async def list_volumes(self):
+        result = await self._request('GET', '/volumes?per_page=50')
+        return result.get('volumes', []) if result else []
+
+    async def create_volume(self, name, size, server_id):
+        return await self._request('POST', '/volumes', {
+            'name': name,
+            'size': size,
+            'server': server_id,
+            'automount': True,
+            'format': 'ext4',
+        })
+
+    async def attach_volume(self, volume_id, server_id):
+        return await self._request('POST', f'/volumes/{volume_id}/actions/attach', {
+            'server': server_id,
+            'automount': True,
+        })
+
+    async def detach_volume(self, volume_id):
+        return await self._request('POST', f'/volumes/{volume_id}/actions/detach')
+
+    async def delete_volume(self, volume_id):
+        # returns {} on success (204), None on failure
+        return await self._request('DELETE', f'/volumes/{volume_id}')
+
     async def get_pricing(self):
         result = await self._request('GET', '/pricing')
         return result.get('pricing', {}) if result else {}
 
     async def wait_for_status(self, server_id, target_status, max_attempts=40):
         for i in range(max_attempts):
-            server = await self.get_server(server_id)
+            server = await self.get_server(server_id, fresh=True)
             if server and server.get('status') == target_status:
                 logger.info(f"Server {server_id} reached status: {target_status}")
                 return True

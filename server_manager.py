@@ -79,7 +79,7 @@ async def reset_server_traffic(server_id, progress_callback=None):
         
         await add_log("⏳", "Waiting for upgrade to complete...")
         for i in range(30):
-            server = await hetzner_api.get_server(server_id)
+            server = await hetzner_api.get_server(server_id, fresh=True)
             if server and server.get('server_type', {}).get('name') == upgrade_type:
                 await add_log("✅", "Upgrade completed successfully")
                 break
@@ -118,7 +118,7 @@ async def reset_server_traffic(server_id, progress_callback=None):
         
         await add_log("⏳", "Waiting for downgrade to complete...")
         for i in range(30):
-            server = await hetzner_api.get_server(server_id)
+            server = await hetzner_api.get_server(server_id, fresh=True)
             if server and server.get('server_type', {}).get('name') == current_type:
                 await add_log("✅", "Downgrade completed successfully")
                 break
