@@ -28,13 +28,14 @@ sed "s|__DIR__|$DIR|g" hetzner-bot.service > /etc/systemd/system/hetzner-bot.ser
 systemctl daemon-reload
 systemctl enable hetzner-bot
 
-echo "🧰 Installing the 'hetzner-bot' management command..."
-install -m 755 "$DIR/hetzner-bot.sh" /usr/local/bin/hetzner-bot
+echo "🧰 Installing the 'hetzner' management command..."
+install -m 755 "$DIR/hetzner-bot.sh" /usr/local/bin/hetzner
+rm -f /usr/local/bin/hetzner-bot
 
 echo ""
 echo "✅ Done. After filling .env, start the bot with:"
 echo "    systemctl start hetzner-bot"
 echo ""
 echo "Manage the bot anytime with the interactive CLI:"
-echo "    hetzner-bot              # menu"
-echo "    hetzner-bot update       # or: start|stop|restart|status|logs|env"
+echo "    hetzner              # menu"
+echo "    hetzner update       # or: start|stop|restart|status|logs|env"

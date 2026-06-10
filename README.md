@@ -109,17 +109,17 @@ relative paths.
 
 ### 🧰 Management CLI
 
-`install.sh` also installs a `hetzner-bot` command. Run it with no
+`install.sh` also installs a `hetzner` command. Run it with no
 arguments for an interactive menu, or use subcommands directly:
 
 ```bash
-hetzner-bot              # interactive menu
-hetzner-bot update       # pull latest version + restart
-hetzner-bot status       # service status
-hetzner-bot logs         # live logs (Ctrl+C to exit)
-hetzner-bot start | stop | restart
-hetzner-bot env          # edit .env, then restart
-hetzner-bot uninstall    # remove service (asks before deleting data)
+hetzner              # interactive menu
+hetzner update       # pull latest version + restart
+hetzner status       # service status
+hetzner logs         # live logs (Ctrl+C to exit)
+hetzner start | stop | restart
+hetzner env          # edit .env, then restart
+hetzner uninstall    # remove service (asks before deleting data)
 ```
 
 ---
@@ -307,17 +307,17 @@ python3 main.py
 
 ### 🧰 منوی مدیریت (CLI)
 
-اسکریپت `install.sh` یه دستور `hetzner-bot` هم نصب می‌کنه. بدون آرگومان
+اسکریپت `install.sh` یه دستور `hetzner` هم نصب می‌کنه. بدون آرگومان
 منوی تعاملی باز میشه، یا مستقیم از زیردستورها استفاده کن:
 
 ```bash
-hetzner-bot              # منوی تعاملی
-hetzner-bot update       # دریافت آخرین نسخه + ری‌استارت
-hetzner-bot status       # وضعیت سرویس
-hetzner-bot logs         # لاگ زنده (خروج با Ctrl+C)
-hetzner-bot start | stop | restart
-hetzner-bot env          # ویرایش .env و ری‌استارت
-hetzner-bot uninstall    # حذف سرویس (قبل از حذف دیتا می‌پرسه)
+hetzner              # منوی تعاملی
+hetzner update       # دریافت آخرین نسخه + ری‌استارت
+hetzner status       # وضعیت سرویس
+hetzner logs         # لاگ زنده (خروج با Ctrl+C)
+hetzner start | stop | restart
+hetzner env          # ویرایش .env و ری‌استارت
+hetzner uninstall    # حذف سرویس (قبل از حذف دیتا می‌پرسه)
 ```
 
 ---

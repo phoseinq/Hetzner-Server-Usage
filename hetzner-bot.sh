@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Interactive management CLI for the Hetzner Server Manager Bot.
-# install.sh installs this as `hetzner-bot`, so you can run it from anywhere.
+# install.sh installs this as `hetzner`, so you can run it from anywhere.
 # Subcommands also work non-interactively:
-#   hetzner-bot install|update|uninstall|start|stop|restart|status|logs|env
+#   hetzner install|update|uninstall|start|stop|restart|status|logs|env
 
 SERVICE="hetzner-bot"
 DIR_DEFAULT="/opt/Hetzner-Server-Usage"
@@ -71,7 +71,8 @@ do_update() {
     ./venv/bin/pip install --quiet -r requirements.txt
     # keep the service unit in sync with the repo template
     sed "s|__DIR__|$DIR|g" hetzner-bot.service > "/etc/systemd/system/$SERVICE.service"
-    install -m 755 hetzner-bot.sh /usr/local/bin/hetzner-bot
+    install -m 755 hetzner-bot.sh /usr/local/bin/hetzner
+    rm -f /usr/local/bin/hetzner-bot
     systemctl daemon-reload
     systemctl restart "$SERVICE"
     sleep 3
@@ -89,8 +90,8 @@ do_uninstall() {
     systemctl disable --now "$SERVICE" 2>/dev/null
     rm -f "/etc/systemd/system/$SERVICE.service"
     systemctl daemon-reload
-    rm -f /usr/local/bin/hetzner-bot
-    echo -e "${GREEN}Service and 'hetzner-bot' command removed.${PLAIN}"
+    rm -f /usr/local/bin/hetzner /usr/local/bin/hetzner-bot
+    echo -e "${GREEN}Service and 'hetzner' command removed.${PLAIN}"
     read -r -p "Also DELETE $DIR (.env + cost history included)? [y/N] " b
     case "$b" in
         [Yy]*) rm -rf "$DIR"; echo "Directory deleted." ;;
@@ -130,7 +131,7 @@ case "$1" in
     env)              do_env;       exit 0 ;;
     "") ;;  # no argument: open the interactive menu
     *)
-        echo "Usage: hetzner-bot [install|update|uninstall|start|stop|restart|status|logs|env]"
+        echo "Usage: hetzner [install|update|uninstall|start|stop|restart|status|logs|env]"
         exit 1
         ;;
 esac
