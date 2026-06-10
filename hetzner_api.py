@@ -93,9 +93,42 @@ class HetznerAPI:
         result = await self._request('GET', '/floating_ips?per_page=50')
         return result.get('floating_ips', []) if result else []
 
+    async def create_floating_ip(self, ip_type, home_location, name, description=None):
+        return await self._request('POST', '/floating_ips', {
+            'type': ip_type,
+            'home_location': home_location,
+            'name': name,
+            'description': description or name,
+        })
+
+    async def delete_floating_ip(self, fip_id):
+        # returns {} on success (204), None on failure
+        return await self._request('DELETE', f'/floating_ips/{fip_id}')
+
     async def list_primary_ips(self):
         result = await self._request('GET', '/primary_ips?per_page=50')
         return result.get('primary_ips', []) if result else []
+
+    async def create_primary_ip(self, ip_type, datacenter, name):
+        return await self._request('POST', '/primary_ips', {
+            'type': ip_type,
+            'datacenter': datacenter,
+            'name': name,
+            'assignee_type': 'server',
+            'auto_delete': False,
+        })
+
+    async def delete_primary_ip(self, pip_id):
+        # returns {} on success (204), None on failure
+        return await self._request('DELETE', f'/primary_ips/{pip_id}')
+
+    async def list_locations(self):
+        result = await self._request('GET', '/locations')
+        return result.get('locations', []) if result else []
+
+    async def list_datacenters(self):
+        result = await self._request('GET', '/datacenters?per_page=50')
+        return result.get('datacenters', []) if result else []
 
     async def get_pricing(self):
         result = await self._request('GET', '/pricing')

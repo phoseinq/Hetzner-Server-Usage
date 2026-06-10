@@ -45,14 +45,24 @@ def _primary_ip_price(pricing, pip):
     return 0.0
 
 
+def _main_menu_keyboard():
+    return [
+        [
+            InlineKeyboardButton("📊 Servers", callback_data="list_servers"),
+            InlineKeyboardButton("📸 Snapshots", callback_data="snapshots"),
+        ],
+        [
+            InlineKeyboardButton("🌐 Floating IPs", callback_data="fips"),
+            InlineKeyboardButton("📍 Primary IPs", callback_data="pips"),
+        ],
+        [InlineKeyboardButton("💸 Cost Report", callback_data="overage_cost")],
+    ]
+
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != Config.ADMIN_ID:
         return
-    keyboard = [
-        [InlineKeyboardButton("📊 Server Management Panel", callback_data="list_servers")],
-        [InlineKeyboardButton("📸 Snapshots", callback_data="snapshots")],
-        [InlineKeyboardButton("💸 Cost Report", callback_data="overage_cost")],
-    ]
+    keyboard = _main_menu_keyboard()
     await update.message.reply_text(
         "🚀 *Hetzner Server Manager Bot*\n\n"
         "Manage your Hetzner Cloud servers with ease.\n"
@@ -103,6 +113,48 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delete_snapshot_confirm(query, context, int(data.split("_")[1]))
     elif data.startswith("snap_"):
         await show_snapshot_detail(query, context, int(data.split("_")[1]))
+    elif data == "fips":
+        await show_ip_list(query, context, "fip")
+    elif data == "fip_new":
+        await ip_new_type(query, context, "fip")
+    elif data.startswith("fipnewt_"):
+        await ip_new_place(query, context, "fip", data.split("_")[1])
+    elif data.startswith("fipnewl_"):
+        _, ip_type, place = data.split("_")
+        await ip_new_count(query, context, "fip", ip_type, place)
+    elif data.startswith("fipnewc_"):
+        _, ip_type, place, count = data.split("_")
+        await ip_create(query, context, "fip", ip_type, place, int(count))
+    elif data.startswith("fiptog_"):
+        await ip_toggle(query, context, "fip", int(data.split("_")[1]))
+    elif data == "fipdelsel_yes":
+        await ip_delete_selected(query, context, "fip")
+    elif data == "fipdelsel":
+        await ip_delete_confirm(query, context, "fip")
+    elif data == "fipclear":
+        context.user_data["fip_sel"] = set()
+        await show_ip_list(query, context, "fip")
+    elif data == "pips":
+        await show_ip_list(query, context, "pip")
+    elif data == "pip_new":
+        await ip_new_type(query, context, "pip")
+    elif data.startswith("pipnewt_"):
+        await ip_new_place(query, context, "pip", data.split("_")[1])
+    elif data.startswith("pipnewl_"):
+        _, ip_type, place = data.split("_")
+        await ip_new_count(query, context, "pip", ip_type, place)
+    elif data.startswith("pipnewc_"):
+        _, ip_type, place, count = data.split("_")
+        await ip_create(query, context, "pip", ip_type, place, int(count))
+    elif data.startswith("piptog_"):
+        await ip_toggle(query, context, "pip", int(data.split("_")[1]))
+    elif data == "pipdelsel_yes":
+        await ip_delete_selected(query, context, "pip")
+    elif data == "pipdelsel":
+        await ip_delete_confirm(query, context, "pip")
+    elif data == "pipclear":
+        context.user_data["pip_sel"] = set()
+        await show_ip_list(query, context, "pip")
     elif data == "start_menu":
         await show_start_menu(query)
 
@@ -545,12 +597,226 @@ async def create_snapshot(query, context, server_id):
         )
 
 
-async def show_start_menu(query):
+_IP_LABEL = {"fip": ("🌐", "Floating IP"), "pip": ("📍", "Primary IP")}
+
+
+async def _fetch_ips(kind):
+    if kind == "fip":
+        return await hetzner_api.list_floating_ips()
+    return await hetzner_api.list_primary_ips()
+
+
+def _ip_assignee_id(kind, ip):
+    return ip.get("server") if kind == "fip" else ip.get("assignee_id")
+
+
+def _ip_location_name(kind, ip):
+    if kind == "fip":
+        return ip.get("home_location", {}).get("name", "")
+    return ip.get("datacenter", {}).get("location", {}).get("name", "")
+
+
+async def show_ip_list(query, context, kind):
+    emoji, label = _IP_LABEL[kind]
+    ips, pricing, servers = await asyncio.gather(
+        _fetch_ips(kind),
+        hetzner_api.get_pricing(),
+        hetzner_api.list_servers(),
+    )
+    server_names = {s["id"]: s.get("name", "?") for s in servers}
+
+    existing_ids = {ip["id"] for ip in ips}
+    sel = {i for i in context.user_data.get(f"{kind}_sel", set()) if i in existing_ids}
+    context.user_data[f"{kind}_sel"] = sel
+
+    text = f"{emoji} *{label}s*\n\n"
+    keyboard = [[InlineKeyboardButton(f"➕ Create {label}s", callback_data=f"{kind}_new")]]
+
+    if not ips:
+        text += f"No {label.lower()}s yet.\n"
+    else:
+        total_cost = 0
+        for ip in ips:
+            aid = _ip_assignee_id(kind, ip)
+            loc = _ip_location_name(kind, ip)
+            _, flag = get_location_info(loc)
+            if kind == "fip":
+                price = _floating_ip_price(pricing, ip)
+            else:
+                price = 0 if aid else _primary_ip_price(pricing, ip)
+            total_cost += price
+            attach = f"🔗 {server_names.get(aid, aid)}" if aid else "🆓 unassigned"
+            cost_str = "free (on server)" if (kind == "pip" and aid) else f"€{price:.2f}/mo"
+            text += f"• `{ip.get('ip')}` {flag} {ip.get('type')} | {attach} | {cost_str}\n"
+            keyboard.append([InlineKeyboardButton(
+                f"{'✅' if ip['id'] in sel else '⬜'} {ip.get('ip')}",
+                callback_data=f"{kind}tog_{ip['id']}",
+            )])
+        text += f"\nTotal: {len(ips)} | €{total_cost:.2f}/month\n"
+        text += "\nTap IPs to select them, then delete together."
+
+    if sel:
+        keyboard.append([
+            InlineKeyboardButton(f"🗑 Delete Selected ({len(sel)})", callback_data=f"{kind}delsel"),
+            InlineKeyboardButton("♻️ Clear", callback_data=f"{kind}clear"),
+        ])
+    text += f"\n\n🕓 Updated: `{datetime.now().strftime('%H:%M:%S')}`"
+    keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"{kind}s")])
+    keyboard.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
+async def ip_toggle(query, context, kind, ip_id):
+    sel = context.user_data.setdefault(f"{kind}_sel", set())
+    sel.symmetric_difference_update({ip_id})
+    await show_ip_list(query, context, kind)
+
+
+async def ip_new_type(query, context, kind):
+    emoji, label = _IP_LABEL[kind]
     keyboard = [
-        [InlineKeyboardButton("📊 Server Management Panel", callback_data="list_servers")],
-        [InlineKeyboardButton("📸 Snapshots", callback_data="snapshots")],
-        [InlineKeyboardButton("💸 Cost Report", callback_data="overage_cost")],
+        [
+            InlineKeyboardButton("IPv4", callback_data=f"{kind}newt_ipv4"),
+            InlineKeyboardButton("IPv6", callback_data=f"{kind}newt_ipv6"),
+        ],
+        [InlineKeyboardButton("⬅️ Back", callback_data=f"{kind}s")],
     ]
+    await query.edit_message_text(
+        f"{emoji} *Create {label}s*\n\nChoose the IP type:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def ip_new_place(query, context, kind, ip_type):
+    emoji, label = _IP_LABEL[kind]
+    if kind == "fip":
+        places = [loc.get("name", "") for loc in await hetzner_api.list_locations()]
+    else:
+        # primary IPs are created in a specific datacenter
+        places = [dc.get("name", "") for dc in await hetzner_api.list_datacenters()]
+    keyboard = []
+    row = []
+    for place in places:
+        if not place:
+            continue
+        _, flag = get_location_info(place.split("-")[0])
+        row.append(InlineKeyboardButton(f"{flag} {place}", callback_data=f"{kind}newl_{ip_type}_{place}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data=f"{kind}_new")])
+    await query.edit_message_text(
+        f"{emoji} *Create {label}s* ({ip_type})\n\nChoose the location:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def ip_new_count(query, context, kind, ip_type, place):
+    emoji, label = _IP_LABEL[kind]
+    keyboard = [
+        [InlineKeyboardButton(str(n), callback_data=f"{kind}newc_{ip_type}_{place}_{n}")
+         for n in (1, 2, 3, 5)],
+        [InlineKeyboardButton("⬅️ Back", callback_data=f"{kind}newt_{ip_type}")],
+    ]
+    await query.edit_message_text(
+        f"{emoji} *Create {label}s* ({ip_type} @ {place})\n\nHow many?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def ip_create(query, context, kind, ip_type, place, count):
+    emoji, label = _IP_LABEL[kind]
+    await query.edit_message_text(f"{emoji} Creating {count} {label.lower()}(s)...")
+    stamp = datetime.now().strftime('%y%m%d%H%M%S')
+    lines = []
+    ok = 0
+    for i in range(count):
+        name = f"{kind}-{stamp}-{i + 1}"
+        if kind == "fip":
+            result = await hetzner_api.create_floating_ip(ip_type, place, name)
+            created = (result or {}).get("floating_ip", {})
+        else:
+            result = await hetzner_api.create_primary_ip(ip_type, place, name)
+            created = (result or {}).get("primary_ip", {})
+        if result:
+            ok += 1
+            lines.append(f"✅ `{created.get('ip', name)}`")
+        else:
+            lines.append(f"❌ {name} — creation failed")
+    text = (
+        f"{emoji} *Create {label}s — done ({ok}/{count})*\n\n" + "\n".join(lines)
+    )
+    keyboard = [
+        [InlineKeyboardButton(f"{emoji} View {label}s", callback_data=f"{kind}s")],
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
+async def ip_delete_confirm(query, context, kind):
+    emoji, label = _IP_LABEL[kind]
+    sel = context.user_data.get(f"{kind}_sel", set())
+    if not sel:
+        await show_ip_list(query, context, kind)
+        return
+    ips = await _fetch_ips(kind)
+    chosen = [ip for ip in ips if ip["id"] in sel]
+    lines = "\n".join(f"• `{ip.get('ip')}`" for ip in chosen)
+    note = ""
+    if kind == "pip" and any(_ip_assignee_id(kind, ip) for ip in chosen):
+        note = "\n⚠️ Primary IPs attached to a server cannot be deleted — those will fail."
+    keyboard = [
+        [
+            InlineKeyboardButton(f"✅ Yes, delete {len(chosen)}", callback_data=f"{kind}delsel_yes"),
+            InlineKeyboardButton("❌ Cancel", callback_data=f"{kind}s"),
+        ]
+    ]
+    await query.edit_message_text(
+        f"🗑 *Delete {label}s*\n\n{lines}\n{note}\n"
+        f"⚠️ This cannot be undone. Are you sure?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def ip_delete_selected(query, context, kind):
+    emoji, label = _IP_LABEL[kind]
+    sel = context.user_data.get(f"{kind}_sel", set())
+    if not sel:
+        await show_ip_list(query, context, kind)
+        return
+    await query.edit_message_text(f"🗑 Deleting {len(sel)} {label.lower()}(s)...")
+    ips = await _fetch_ips(kind)
+    ip_by_id = {ip["id"]: ip for ip in ips}
+    lines = []
+    ok = 0
+    for ip_id in sorted(sel):
+        addr = ip_by_id.get(ip_id, {}).get("ip", ip_id)
+        if kind == "fip":
+            result = await hetzner_api.delete_floating_ip(ip_id)
+        else:
+            result = await hetzner_api.delete_primary_ip(ip_id)
+        if result is not None:
+            ok += 1
+            lines.append(f"✅ `{addr}` deleted")
+        else:
+            lines.append(f"❌ `{addr}` failed (still attached?)")
+    context.user_data[f"{kind}_sel"] = set()
+    text = f"🗑 *Delete {label}s — done ({ok}/{len(lines)})*\n\n" + "\n".join(lines)
+    keyboard = [
+        [InlineKeyboardButton(f"{emoji} View {label}s", callback_data=f"{kind}s")],
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
+async def show_start_menu(query):
+    keyboard = _main_menu_keyboard()
     await query.edit_message_text(
         "🚀 *Hetzner Server Manager Bot*\n\n"
         "Manage your Hetzner Cloud servers with ease.\n"
