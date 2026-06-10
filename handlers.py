@@ -1,3 +1,4 @@
+import asyncio
 import calendar
 import logging
 from datetime import datetime
@@ -13,11 +14,43 @@ from shell_handler import console_entry, active_sessions
 logger = logging.getLogger(__name__)
 
 
+def _gross(price_dict):
+    try:
+        return float(price_dict.get("gross", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _image_price_per_gb(pricing):
+    return _gross(pricing.get("image", {}).get("price_per_gb_month", {}))
+
+
+def _floating_ip_price(pricing, fip):
+    loc = fip.get("home_location", {}).get("name")
+    for entry in pricing.get("floating_ips", []):
+        if entry.get("type") == fip.get("type"):
+            for p in entry.get("prices", []):
+                if p.get("location") == loc:
+                    return _gross(p.get("price_monthly", {}))
+    return _gross(pricing.get("floating_ip", {}).get("price_monthly", {}))
+
+
+def _primary_ip_price(pricing, pip):
+    loc = pip.get("datacenter", {}).get("location", {}).get("name")
+    for entry in pricing.get("primary_ips", []):
+        if entry.get("type") == pip.get("type"):
+            for p in entry.get("prices", []):
+                if p.get("location") == loc:
+                    return _gross(p.get("price_monthly", {}))
+    return 0.0
+
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != Config.ADMIN_ID:
         return
     keyboard = [
         [InlineKeyboardButton("📊 Server Management Panel", callback_data="list_servers")],
+        [InlineKeyboardButton("📸 Snapshots", callback_data="snapshots")],
         [InlineKeyboardButton("💸 Cost Report", callback_data="overage_cost")],
     ]
     await update.message.reply_text(
@@ -58,6 +91,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reset_password(query, context, int(data.split("_")[1]))
     elif data == "overage_cost":
         await show_overage_cost(query, context)
+    elif data == "snapshots":
+        await show_snapshots(query, context)
+    elif data == "snap_new":
+        await snapshot_pick_server(query, context)
+    elif data.startswith("snapcreate_"):
+        await create_snapshot(query, context, int(data.split("_")[1]))
+    elif data.startswith("snapdel_confirm_"):
+        await delete_snapshot(query, context, int(data.split("_")[2]))
+    elif data.startswith("snapdel_"):
+        await delete_snapshot_confirm(query, context, int(data.split("_")[1]))
+    elif data.startswith("snap_"):
+        await show_snapshot_detail(query, context, int(data.split("_")[1]))
     elif data == "start_menu":
         await show_start_menu(query)
 
@@ -253,7 +298,13 @@ async def reset_password_confirm(query, context, server_id):
 
 
 async def show_overage_cost(query, context):
-    servers = await hetzner_api.list_servers()
+    servers, pricing, snapshots, floating_ips, primary_ips = await asyncio.gather(
+        hetzner_api.list_servers(),
+        hetzner_api.get_pricing(),
+        hetzner_api.list_images(),
+        hetzner_api.list_floating_ips(),
+        hetzner_api.list_primary_ips(),
+    )
     if not servers:
         await query.edit_message_text("⚠️ No servers found or API error occurred.")
         return
@@ -277,22 +328,45 @@ async def show_overage_cost(query, context):
         server_details.append(line)
 
     monthly_overage = overage_tracker.get_current_month_overage()
-    total_usage = total_server_cost + monthly_overage
     total_historic = overage_tracker.get_total_overage()
     monthly_breakdown = overage_tracker.get_monthly_breakdown()
+
+    snap_size = sum(i.get("image_size") or 0 for i in snapshots)
+    snapshot_cost = snap_size * _image_price_per_gb(pricing)
+    floating_cost = sum(_floating_ip_price(pricing, f) for f in floating_ips)
+    assigned_pips = [p for p in primary_ips if p.get("assignee_id")]
+    unassigned_pips = [p for p in primary_ips if not p.get("assignee_id")]
+    extra_primary_cost = sum(_primary_ip_price(pricing, p) for p in unassigned_pips)
+
+    total_usage = (
+        total_server_cost + monthly_overage
+        + snapshot_cost + floating_cost + extra_primary_cost
+    )
 
     now = datetime.now()
     days_in_month = calendar.monthrange(now.year, now.month)[1]
     projected_overage = monthly_overage / now.day * days_in_month
 
+    primary_line = f"📍 Primary IPs: {len(assigned_pips)} on servers (free)"
+    if unassigned_pips:
+        primary_line += f" | {len(unassigned_pips)} unassigned → €{extra_primary_cost:.2f}"
+
     text = (
         f"💸 *COST REPORT*\n\n"
         f"📦 *Servers (This Month)*\n" + "\n".join(server_details) + "\n\n"
+        f"🧩 *Other Resources*\n"
+        f"📸 Snapshots ({len(snapshots)}): {snap_size:.1f} GB → €{snapshot_cost:.2f}\n"
+        f"🌐 Floating IPs ({len(floating_ips)}): €{floating_cost:.2f}\n"
+        f"{primary_line}\n\n"
         f"📊 *Summary*\n"
         f"📦 Server costs: €{total_server_cost:.2f}\n"
         f"📈 Overage: €{monthly_overage:.2f}\n"
-        f"💰 Total: €{total_usage:.2f}\n\n"
+        f"📸 Snapshots: €{snapshot_cost:.2f}\n"
+        f"🌐 Floating IPs: €{floating_cost:.2f}\n"
     )
+    if unassigned_pips:
+        text += f"📍 Extra primary IPs: €{extra_primary_cost:.2f}\n"
+    text += f"💰 Total: €{total_usage:.2f}\n\n"
     if monthly_overage > 0:
         text += (
             f"🔮 *Projected Month-End Overage*\n"
@@ -313,9 +387,164 @@ async def show_overage_cost(query, context):
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
+async def show_snapshots(query, context):
+    images, pricing = await asyncio.gather(
+        hetzner_api.list_images(),
+        hetzner_api.get_pricing(),
+    )
+    per_gb = _image_price_per_gb(pricing)
+
+    text = "📸 *SNAPSHOTS*\n\n"
+    keyboard = [[InlineKeyboardButton("➕ Take Snapshot", callback_data="snap_new")]]
+
+    if not images:
+        text += "No snapshots yet.\n"
+    else:
+        total_size = sum(i.get("image_size") or 0 for i in images)
+        text += (
+            f"Total: {len(images)} | {total_size:.1f} GB | "
+            f"€{total_size * per_gb:.2f}/month\n\n"
+            f"Tap a snapshot to manage it:"
+        )
+        for img in images:
+            s_emoji = "✅" if img.get("status") == "available" else "⏳"
+            size = img.get("image_size") or 0
+            label = img.get("description") or img.get("name") or str(img["id"])
+            keyboard.append([InlineKeyboardButton(
+                f"{s_emoji} {label} | {size:.1f} GB",
+                callback_data=f"snap_{img['id']}",
+            )])
+
+    text += f"\n\n🕓 Updated: `{datetime.now().strftime('%H:%M:%S')}`"
+    keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data="snapshots")])
+    keyboard.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
+async def show_snapshot_detail(query, context, image_id):
+    img, pricing = await asyncio.gather(
+        hetzner_api.get_image(image_id),
+        hetzner_api.get_pricing(),
+    )
+    if not img:
+        await query.edit_message_text(
+            "⚠️ Snapshot not found.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="snapshots")]]),
+        )
+        return
+
+    size = img.get("image_size") or 0
+    cost = size * _image_price_per_gb(pricing)
+    status = img.get("status", "unknown")
+    s_emoji = "✅" if status == "available" else "⏳"
+    created = img.get("created", "")[:16].replace("T", " ")
+    source = img.get("created_from", {}) or {}
+
+    text = (
+        f"📸 *Snapshot Detail*\n\n"
+        f"🏷 Name: `{img.get('description') or img.get('name') or image_id}`\n"
+        f"🆔 ID: `{img['id']}`\n"
+        f"🖥 Server: `{source.get('name', 'N/A')}`\n"
+        f"💾 Size: `{size:.2f} GB`\n"
+        f"💰 Cost: `€{cost:.2f}/month`\n"
+        f"{s_emoji} Status: `{status.upper()}`\n"
+        f"📅 Created: `{created}`\n"
+    )
+    keyboard = [
+        [InlineKeyboardButton("🗑 Delete Snapshot", callback_data=f"snapdel_{image_id}")],
+        [InlineKeyboardButton("⬅️ Back to Snapshots", callback_data="snapshots")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
+async def delete_snapshot_confirm(query, context, image_id):
+    img = await hetzner_api.get_image(image_id)
+    label = (img.get("description") or img.get("name") or str(image_id)) if img else str(image_id)
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Yes, delete it", callback_data=f"snapdel_confirm_{image_id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data=f"snap_{image_id}"),
+        ]
+    ]
+    await query.edit_message_text(
+        f"🗑 *Delete Snapshot*\n\n"
+        f"Snapshot: `{label}`\n\n"
+        f"⚠️ This cannot be undone. Are you sure?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def delete_snapshot(query, context, image_id):
+    await query.edit_message_text("🗑 Deleting snapshot...")
+    result = await hetzner_api.delete_image(image_id)
+    keyboard = [[InlineKeyboardButton("⬅️ Back to Snapshots", callback_data="snapshots")]]
+    if result is not None:
+        await query.edit_message_text(
+            "✅ Snapshot deleted successfully.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    else:
+        await query.edit_message_text(
+            "❌ Failed to delete snapshot. Check the logs and try again.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+async def snapshot_pick_server(query, context):
+    servers = await hetzner_api.list_servers()
+    if not servers:
+        await query.edit_message_text("⚠️ No servers found or API error occurred.")
+        return
+    keyboard = []
+    for s in servers:
+        loc_name, flag = get_location_info(s.get("datacenter", {}).get("location", {}).get("name", ""))
+        keyboard.append([InlineKeyboardButton(
+            f"🖥 {s.get('name', 'Unnamed')} | {flag} {loc_name}",
+            callback_data=f"snapcreate_{s['id']}",
+        )])
+    keyboard.append([InlineKeyboardButton("⬅️ Back to Snapshots", callback_data="snapshots")])
+    await query.edit_message_text(
+        "📸 *Take Snapshot*\n\nChoose a server:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def create_snapshot(query, context, server_id):
+    server = await hetzner_api.get_server(server_id)
+    if not server:
+        await query.edit_message_text("⚠️ Server not found or API error.")
+        return
+    name = server.get("name", "Server")
+    description = f"{name} {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+    await query.edit_message_text(f"📸 Creating snapshot of `{name}`...", parse_mode="Markdown")
+    result = await hetzner_api.create_snapshot(server_id, description)
+
+    keyboard = [[InlineKeyboardButton("📸 View Snapshots", callback_data="snapshots")],
+                [InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")]]
+    if result:
+        await query.edit_message_text(
+            f"⏳ *Snapshot creation started*\n\n"
+            f"🖥 Server: `{name}`\n"
+            f"🏷 Name: `{description}`\n\n"
+            f"The server keeps running. It can take several minutes — "
+            f"the snapshot shows ⏳ in the list until it becomes ✅ available.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+    else:
+        await query.edit_message_text(
+            "❌ Failed to start snapshot creation. Check the logs and try again.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
 async def show_start_menu(query):
     keyboard = [
         [InlineKeyboardButton("📊 Server Management Panel", callback_data="list_servers")],
+        [InlineKeyboardButton("📸 Snapshots", callback_data="snapshots")],
         [InlineKeyboardButton("💸 Cost Report", callback_data="overage_cost")],
     ]
     await query.edit_message_text(

@@ -22,16 +22,20 @@ class HetznerAPI:
                         method, url, headers=self.headers, json=data,
                         timeout=aiohttp.ClientTimeout(total=30)
                     ) as response:
-                        result = await response.json()
                         if response.status == 429:
                             wait_time = min(2 ** attempt * 5, 60)
                             logger.warning(f"Rate limited. Waiting {wait_time}s...")
                             await asyncio.sleep(wait_time)
                             continue
+                        try:
+                            result = await response.json()
+                        except Exception:
+                            # DELETE returns 204 with an empty body
+                            result = {}
                         if response.status >= 400:
                             logger.error(f"API Error {response.status}: {result}")
                             return None
-                        return result
+                        return result if result is not None else {}
             except Exception as e:
                 logger.error(f"Request failed (attempt {attempt + 1}): {e}")
                 if attempt < retry - 1:
@@ -66,6 +70,36 @@ class HetznerAPI:
 
     async def reset_password(self, server_id):
         return await self._request('POST', f'/servers/{server_id}/actions/reset_password')
+
+    async def list_images(self, image_type='snapshot'):
+        result = await self._request('GET', f'/images?type={image_type}&per_page=50')
+        return result.get('images', []) if result else []
+
+    async def get_image(self, image_id):
+        result = await self._request('GET', f'/images/{image_id}')
+        return result.get('image') if result else None
+
+    async def create_snapshot(self, server_id, description):
+        return await self._request('POST', f'/servers/{server_id}/actions/create_image', {
+            'type': 'snapshot',
+            'description': description,
+        })
+
+    async def delete_image(self, image_id):
+        # returns {} on success (204), None on failure
+        return await self._request('DELETE', f'/images/{image_id}')
+
+    async def list_floating_ips(self):
+        result = await self._request('GET', '/floating_ips?per_page=50')
+        return result.get('floating_ips', []) if result else []
+
+    async def list_primary_ips(self):
+        result = await self._request('GET', '/primary_ips?per_page=50')
+        return result.get('primary_ips', []) if result else []
+
+    async def get_pricing(self):
+        result = await self._request('GET', '/pricing')
+        return result.get('pricing', {}) if result else {}
 
     async def wait_for_status(self, server_id, target_status, max_attempts=40):
         for i in range(max_attempts):

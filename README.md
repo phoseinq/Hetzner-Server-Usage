@@ -29,7 +29,8 @@ A Telegram bot that lets you monitor and manage all your Hetzner Cloud servers f
 - 🔴 **Power Control** — Turn servers on/off instantly
 - 💻 **SSH Console** — Run commands directly from Telegram chat
 - 🔑 **Reset Password** — Generate a new root password via Hetzner API
-- 💸 **Cost Report** — Per-server costs, persisted overage history & month-end projection
+- 📸 **Snapshots** — Take, list and delete server snapshots from the bot
+- 💸 **Cost Report** — Per-server costs, snapshots, floating/primary IPs, persisted overage history & month-end projection
 - 🔐 **Admin Only** — Only you can access the bot
 
 ---
@@ -203,7 +204,8 @@ MIT — see [LICENSE](LICENSE) for details.
 - 🔴 **کنترل پاور** — روشن و خاموش کردن سرور
 - 💻 **کنسول SSH** — اجرای دستور مستقیم از چت تلگرام
 - 🔑 **ریست پسورد** — تولید پسورد root جدید از طریق API هتزنر
-- 💸 **گزارش هزینه** — هزینه هر سرور، تاریخچه ماندگار اضافه‌مصرف و پیش‌بینی آخر ماه
+- 📸 **اسنپ‌شات** — گرفتن، مشاهده و حذف اسنپ‌شات سرورها از داخل ربات
+- 💸 **گزارش هزینه** — هزینه هر سرور، اسنپ‌شات‌ها، IP های Floating/Primary، تاریخچه ماندگار اضافه‌مصرف و پیش‌بینی آخر ماه
 - 🔐 **فقط ادمین** — فقط شما به ربات دسترسی دارید
 
 ---
