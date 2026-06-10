@@ -94,7 +94,7 @@ async def show_server_list(query, context, page=0):
         emoji = get_traffic_emoji(tb)
         loc_name, flag = get_location_info(s.get("datacenter", {}).get("location", {}).get("name", ""))
         keyboard.append([InlineKeyboardButton(
-            f"{emoji} {s.get('name','Unnamed')} | {loc_name} {flag} | {format_traffic(s.get('outgoing_traffic',0))}",
+            f"{emoji} {s.get('name','Unnamed')} | {flag} {loc_name} | {format_traffic(s.get('outgoing_traffic',0))}",
             callback_data=f"server_{s['id']}",
         )])
 
@@ -145,7 +145,7 @@ async def show_server_detail(query, context, server_id, refresh=False):
 
     text = (
         f"🖥️ *{name}*\n\n"
-        f"📍 Location: `{loc_name} {flag}`\n"
+        f"📍 Location: `{flag} {loc_name}`\n"
         f"🔧 Type: `{stype}`\n"
         f"💻 CPU: `{cores} cores` | RAM: `{memory} GB` | Disk: `{disk} GB`\n"
         f"🌐 IP: `{ip}`\n"
