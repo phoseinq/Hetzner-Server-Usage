@@ -36,6 +36,7 @@ A Telegram bot that lets you monitor and manage all your Hetzner Cloud servers f
 - 💾 **Backups** — Enable/disable Hetzner backups per server
 - 🌐 **Floating & Primary IPs** — Create and delete IPs in bulk with multi-select; attach/detach floating IPs to servers
 - 💸 **Cost Report** — Per-server costs, snapshots, volumes, backups, floating/primary IPs, persisted overage history & month-end projection
+- 🔑 **Multi-account** — Manage several Hetzner accounts from one bot; a picker keeps each account's servers separate and alerts name their account
 - 🛡 **Rate-limit friendly** — Requests are throttled and cached so the bot stays far below Hetzner's API limits
 - 🔐 **Admin Only** — Only you can access the bot
 
@@ -122,6 +123,7 @@ hetzner logs         # live logs (Ctrl+C to exit)
 hetzner start | stop | restart
 hetzner env          # edit .env, then restart
 hetzner tz           # set the bot's timezone (default Asia/Tehran)
+hetzner accounts     # add/remove Hetzner accounts, live connection test
 hetzner uninstall    # remove service (asks before deleting data)
 ```
 
@@ -323,6 +325,7 @@ hetzner logs         # لاگ زنده (خروج با Ctrl+C)
 hetzner start | stop | restart
 hetzner env          # ویرایش .env و ری‌استارت
 hetzner tz           # تنظیم تایم‌زون ربات (پیش‌فرض Asia/Tehran)
+hetzner accounts     # افزودن/حذف اکانت‌های هتزنر با تست اتصال زنده
 hetzner uninstall    # حذف سرویس (قبل از حذف دیتا می‌پرسه)
 ```
 
