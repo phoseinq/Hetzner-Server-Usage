@@ -17,7 +17,23 @@ class Config:
     CRITICAL_THRESHOLD = 0.98
     
     DATA_FILE = 'server_data.csv'
-    
+
+    # Multi-account: HETZNER_API_TOKEN may hold several tokens separated by
+    # comma/newline, each optionally "Name=token". One plain token still works.
+    @staticmethod
+    def _parse_accounts(raw):
+        accounts = []
+        for part in (raw or '').replace('\n', ',').split(','):
+            part = part.strip()
+            if not part:
+                continue
+            if '=' in part:
+                name, tok = part.split('=', 1)
+            else:
+                name, tok = f'Account {len(accounts) + 1}', part
+            accounts.append({'name': name.strip(), 'token': tok.strip()})
+        return accounts
+
     @classmethod
     def validate(cls):
         if not cls.TELEGRAM_TOKEN:
@@ -27,4 +43,5 @@ class Config:
         if not cls.ADMIN_ID:
             raise ValueError("ADMIN_ID is required in .env")
 
+Config.ACCOUNTS = Config._parse_accounts(Config.HETZNER_API_TOKEN)
 Config.validate()

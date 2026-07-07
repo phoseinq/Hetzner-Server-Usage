@@ -5,7 +5,7 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from config import Config
-from hetzner_api import hetzner_api
+from hetzner_api import hetzner_api, set_account, account_count, account_name, all_apis
 from utils import format_traffic, get_traffic_emoji, get_location_info
 from server_manager import reset_server_traffic
 from overage_tracker import overage_tracker
@@ -81,8 +81,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    if data == "list_servers":
+    # every server-scoped action runs against the account the admin picked
+    set_account(context.user_data.get("acct", 0))
+
+    if data.startswith("acct_"):
+        context.user_data["acct"] = int(data.split("_")[1])
+        set_account(context.user_data["acct"])
         await show_server_list(query, context)
+    elif data == "list_servers":
+        if account_count() > 1:
+            await show_account_picker(query, context)
+        else:
+            await show_server_list(query, context)
     elif data.startswith("page_"):
         await show_server_list(query, context, int(data.split("_")[1]))
     elif data.startswith("server_"):
@@ -215,6 +225,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _start_console(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    set_account(context.user_data.get("acct", 0))
     server_id = int(query.data.split("_")[1])
     server = await hetzner_api.get_server(server_id)
     if not server:
@@ -226,6 +237,17 @@ async def _start_console(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ip = server.get("public_net", {}).get("ipv4", {}).get("ip", "")
     name = server.get("name", "Server")
     return await console_entry(query, context, server_id, ip, name)
+
+
+async def show_account_picker(query, context):
+    keyboard = [[InlineKeyboardButton(f"🔑 {account_name(i)}", callback_data=f"acct_{i}")]
+                for i in range(account_count())]
+    keyboard.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")])
+    await query.edit_message_text(
+        "🔑 *Choose a Hetzner account*",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
 
 
 async def show_server_list(query, context, page=0):
@@ -255,10 +277,15 @@ async def show_server_list(query, context, page=0):
         nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"page_{page+1}"))
     if nav:
         keyboard.append(nav)
+    if account_count() > 1:
+        keyboard.append([InlineKeyboardButton("🔑 Switch Account", callback_data="list_servers")])
     keyboard.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")])
 
+    header = "📋 *SERVER LIST*"
+    if account_count() > 1:
+        header += f"\n🔑 Account: `{account_name(context.user_data.get('acct', 0))}`"
     await query.edit_message_text(
-        "📋 *SERVER LIST*\n",
+        header + "\n",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
@@ -422,60 +449,72 @@ async def reset_password_confirm(query, context, server_id):
 
 
 async def show_overage_cost(query, context):
-    servers, pricing, snapshots, floating_ips, primary_ips, volumes = await asyncio.gather(
-        hetzner_api.list_servers(),
-        hetzner_api.get_pricing(),
-        hetzner_api.list_images(),
-        hetzner_api.list_floating_ips(),
-        hetzner_api.list_primary_ips(),
-        hetzner_api.list_volumes(),
-    )
-    if not servers:
-        await query.edit_message_text("⚠️ No servers found or API error occurred.")
-        return
-
-    backup_pct = 20.0
-    try:
-        backup_pct = float(pricing.get("server_backup", {}).get("percentage", 20) or 20)
-    except (TypeError, ValueError):
-        pass
-
+    multi = account_count() > 1
     total_server_cost = backup_cost = 0
     backup_count = 0
+    snap_size = floating_cost = 0
+    unassigned_pips = []
+    assigned_pip_count = 0
+    vol_size = 0
+    snap_count = fip_count = vol_count = 0
     server_details = []
+    pricing = {}
+    any_servers = False
 
-    for s in servers:
-        tb    = s.get("outgoing_traffic", 0) / (1024 ** 4)
-        name  = s.get("name", "Unnamed")
-        stype = s.get("server_type", {}).get("name", "?")
-        prices = s.get("server_type", {}).get("prices", [])
-        sp = float(prices[0].get("price_monthly", {}).get("gross", 0)) if prices else 0
-        total_server_cost += sp
-        ov = max(0, tb - Config.TRAFFIC_LIMIT_TB) * 1.0
-        overage_tracker.update_live_overage(s["id"], ov)
-        ov_month = overage_tracker.get_server_month_overage(s["id"])
-        line = f"• `{name}` ({stype}): €{sp:.2f} | {format_traffic(s.get('outgoing_traffic', 0))}"
-        if s.get("backup_window"):
-            backup_count += 1
-            backup_cost += sp * backup_pct / 100
-            line += " | 💾"
-        if ov_month > 0:
-            line += f" | ⚠️ €{ov_month:.2f} overage"
-        server_details.append(line)
+    for idx, name, api in all_apis():
+        servers, pr, snapshots, floating_ips, primary_ips, volumes = await asyncio.gather(
+            api.list_servers(), api.get_pricing(), api.list_images(),
+            api.list_floating_ips(), api.list_primary_ips(), api.list_volumes(),
+        )
+        pricing = pr or pricing
+        if servers:
+            any_servers = True
+        try:
+            backup_pct = float((pr or {}).get("server_backup", {}).get("percentage", 20) or 20)
+        except (TypeError, ValueError):
+            backup_pct = 20.0
+
+        if multi and servers:
+            server_details.append(f"\n🔑 *{name}*")
+        for s in servers:
+            tb    = s.get("outgoing_traffic", 0) / (1024 ** 4)
+            sname = s.get("name", "Unnamed")
+            stype = s.get("server_type", {}).get("name", "?")
+            prices = s.get("server_type", {}).get("prices", [])
+            sp = float(prices[0].get("price_monthly", {}).get("gross", 0)) if prices else 0
+            total_server_cost += sp
+            ov = max(0, tb - Config.TRAFFIC_LIMIT_TB) * 1.0
+            overage_tracker.update_live_overage(s["id"], ov)
+            ov_month = overage_tracker.get_server_month_overage(s["id"])
+            line = f"• `{sname}` ({stype}): €{sp:.2f} | {format_traffic(s.get('outgoing_traffic', 0))}"
+            if s.get("backup_window"):
+                backup_count += 1
+                backup_cost += sp * backup_pct / 100
+                line += " | 💾"
+            if ov_month > 0:
+                line += f" | ⚠️ €{ov_month:.2f} overage"
+            server_details.append(line)
+
+        snap_size += sum(i.get("image_size") or 0 for i in snapshots)
+        snap_count += len(snapshots)
+        floating_cost += sum(_floating_ip_price(pr or {}, f) for f in floating_ips)
+        fip_count += len(floating_ips)
+        assigned_pip_count += len([p for p in primary_ips if p.get("assignee_id")])
+        unassigned_pips += [p for p in primary_ips if not p.get("assignee_id")]
+        vol_size += sum(v.get("size") or 0 for v in volumes)
+        vol_count += len(volumes)
+
+    if not any_servers:
+        await query.edit_message_text("⚠️ No servers found or API error occurred.")
+        return
 
     monthly_overage = overage_tracker.get_current_month_overage()
     total_historic = overage_tracker.get_total_overage()
     monthly_breakdown = overage_tracker.get_monthly_breakdown()
 
-    snap_size = sum(i.get("image_size") or 0 for i in snapshots)
     snapshot_cost = snap_size * _image_price_per_gb(pricing)
-    floating_cost = sum(_floating_ip_price(pricing, f) for f in floating_ips)
-    assigned_pips = [p for p in primary_ips if p.get("assignee_id")]
-    unassigned_pips = [p for p in primary_ips if not p.get("assignee_id")]
     extra_primary_cost = sum(_primary_ip_price(pricing, p) for p in unassigned_pips)
-
     vol_per_gb = _gross(pricing.get("volume", {}).get("price_per_gb_month", {}) or pricing.get("volume", {}))
-    vol_size = sum(v.get("size") or 0 for v in volumes)
     volume_cost = vol_size * vol_per_gb
 
     total_usage = (
@@ -487,7 +526,7 @@ async def show_overage_cost(query, context):
     days_in_month = calendar.monthrange(now.year, now.month)[1]
     projected_overage = monthly_overage / now.day * days_in_month
 
-    primary_line = f"📍 Primary IPs: {len(assigned_pips)} on servers (free)"
+    primary_line = f"📍 Primary IPs: {assigned_pip_count} on servers (free)"
     if unassigned_pips:
         primary_line += f" | {len(unassigned_pips)} unassigned → €{extra_primary_cost:.2f}"
 
@@ -495,10 +534,10 @@ async def show_overage_cost(query, context):
         f"💸 *COST REPORT*\n\n"
         f"📦 *Servers (This Month)*\n" + "\n".join(server_details) + "\n\n"
         f"🧩 *Other Resources*\n"
-        f"📸 Snapshots ({len(snapshots)}): {snap_size:.1f} GB → €{snapshot_cost:.2f}\n"
-        f"💽 Volumes ({len(volumes)}): {vol_size} GB → €{volume_cost:.2f}\n"
+        f"📸 Snapshots ({snap_count}): {snap_size:.1f} GB → €{snapshot_cost:.2f}\n"
+        f"💽 Volumes ({vol_count}): {vol_size} GB → €{volume_cost:.2f}\n"
         f"💾 Backups ({backup_count} servers): €{backup_cost:.2f}\n"
-        f"🌐 Floating IPs ({len(floating_ips)}): €{floating_cost:.2f}\n"
+        f"🌐 Floating IPs ({fip_count}): €{floating_cost:.2f}\n"
         f"{primary_line}\n\n"
         f"📊 *Summary*\n"
         f"📦 Server costs: €{total_server_cost:.2f}\n"

@@ -154,6 +154,70 @@ do_tz() {
     echo -e "${GREEN}✅ Bot timezone set to $tz — all times in the bot now use it.${PLAIN}"
 }
 
+# ---- Hetzner account management (multi-account) ----
+# Accounts live in .env as HETZNER_API_TOKEN="Name=token,Name2=token2".
+# A plain single token still works and shows as "Account 1".
+_acct_line()  { grep '^HETZNER_API_TOKEN=' "$DIR/.env" 2>/dev/null | cut -d= -f2- | sed 's/^"//; s/"$//'; }
+_acct_save()  { # $1 = new comma-joined value
+    grep -v '^HETZNER_API_TOKEN=' "$DIR/.env" > "$DIR/.env.tmp"
+    echo "HETZNER_API_TOKEN=$1" >> "$DIR/.env.tmp"
+    mv "$DIR/.env.tmp" "$DIR/.env"; chmod 600 "$DIR/.env"
+}
+_acct_test()  { curl -s -o /dev/null -m 10 -w '%{http_code}' \
+                  -H "Authorization: Bearer $1" https://api.hetzner.cloud/v1/servers; }
+
+do_accounts() {
+    need_root
+    [ -f "$DIR/.env" ] || { echo -e "${RED}No .env yet — install first.${PLAIN}"; return; }
+    while true; do
+        clear
+        echo -e "${CYAN}=== Hetzner Accounts ===${PLAIN}\n"
+        local raw; raw="$(_acct_line)"
+        IFS=',' read -r -a parts <<< "$raw"
+        local n=0
+        for p in "${parts[@]}"; do
+            p="$(echo "$p" | sed 's/^ *//; s/ *$//')"
+            [ -z "$p" ] && continue
+            n=$((n+1))
+            local name tok
+            if [[ "$p" == *=* ]]; then name="${p%%=*}"; tok="${p#*=}"; else name="Account $n"; tok="$p"; fi
+            local mask="${tok:0:6}…${tok: -4}"
+            local code; code="$(_acct_test "$tok")"
+            local badge; [ "$code" = "200" ] && badge="${GREEN}● connected${PLAIN}" || badge="${RED}● FAILED ($code)${PLAIN}"
+            echo -e "  $n) ${CYAN}$name${PLAIN}  [$mask]  $badge"
+        done
+        [ "$n" -eq 0 ] && echo "  (no accounts)"
+        echo -e "\n  a) ➕ Add   d) 🗑 Delete   t) 🔄 Re-test   b) ⬅ Back\n"
+        read -r -p "  Choice: " c
+        case "$c" in
+            a)
+                read -r -p "  Account name: " nm
+                read -r -p "  API token: " tk
+                nm="$(echo "$nm" | tr ',=' '  ' | sed 's/^ *//; s/ *$//')"
+                tk="$(echo "$tk" | tr -d ' ,')"
+                [ -z "$tk" ] && { echo "  Cancelled."; sleep 1; continue; }
+                [ -z "$nm" ] && nm="Account $((n+1))"
+                echo -n "  Testing… "; local code; code="$(_acct_test "$tk")"
+                [ "$code" = "200" ] && echo -e "${GREEN}ok${PLAIN}" || echo -e "${YELLOW}token returned $code, adding anyway${PLAIN}"
+                if [ -z "$raw" ]; then _acct_save "$nm=$tk"; else _acct_save "$raw,$nm=$tk"; fi
+                systemctl restart "$SERVICE"; echo "  Added + restarted."; sleep 1 ;;
+            d)
+                read -r -p "  Delete which number? " del
+                [[ "$del" =~ ^[0-9]+$ ]] || { echo "  Invalid."; sleep 1; continue; }
+                local out="" i=0
+                for p in "${parts[@]}"; do
+                    p="$(echo "$p" | sed 's/^ *//; s/ *$//')"; [ -z "$p" ] && continue
+                    i=$((i+1)); [ "$i" -eq "$del" ] && continue
+                    out="${out:+$out,}$p"
+                done
+                _acct_save "$out"; systemctl restart "$SERVICE"; echo "  Deleted + restarted."; sleep 1 ;;
+            t) : ;;  # loop re-tests on redraw
+            b|"") return ;;
+            *) : ;;
+        esac
+    done
+}
+
 case "$1" in
     install)          do_install;   exit 0 ;;
     update)           do_update;    exit 0 ;;
@@ -165,9 +229,10 @@ case "$1" in
     logs)             do_logs;      exit 0 ;;
     env)              do_env;       exit 0 ;;
     tz|timezone)      do_tz "$2";   exit 0 ;;
+    accounts|acct)    do_accounts;  exit 0 ;;
     "") ;;  # no argument: open the interactive menu
     *)
-        echo "Usage: hetzner [install|update|uninstall|start|stop|restart|status|logs|env|tz]"
+        echo "Usage: hetzner [install|update|uninstall|start|stop|restart|status|logs|env|tz|accounts]"
         exit 1
         ;;
 esac
@@ -179,6 +244,7 @@ while true; do
     echo "  3) 🗑  Uninstall            8) 📜 Logs (live)"
     echo "  4) ▶️  Start                9) ⚙️  Edit .env"
     echo "  5) ⏹  Stop                10) 🕒 Timezone"
+    echo "                            11) 🔑 Hetzner Accounts"
     echo "                             0) 🚪 Exit"
     echo
     read -r -p "  Select an option: " choice
@@ -194,6 +260,7 @@ while true; do
         8) do_logs ;;
         9) do_env ;;
         10) do_tz ;;
+        11) do_accounts ;;
         0) exit 0 ;;
         *) echo -e "${RED}Invalid option.${PLAIN}" ;;
     esac

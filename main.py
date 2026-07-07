@@ -29,22 +29,24 @@ def setup_logging():
 
 
 def check_hetzner_token():
-    req = urllib.request.Request(
-        f"{Config.HETZNER_API_BASE}/servers",
-        headers={"Authorization": f"Bearer {Config.HETZNER_API_TOKEN}"},
-    )
-    try:
-        urllib.request.urlopen(req, timeout=15)
-    except urllib.error.HTTPError as e:
-        if e.code == 401:
-            sys.exit(
-                "❌ HETZNER_API_TOKEN is invalid (Hetzner API returned 401).\n"
-                "Create a token in Hetzner Cloud Console → Security → API Tokens "
-                "and put it in .env, then restart the bot."
-            )
-        logging.warning(f"Hetzner API returned HTTP {e.code} during token check")
-    except Exception as e:
-        logging.warning(f"Could not verify Hetzner token (network issue?): {e}")
+    # validate every configured account; exit only if the FIRST one is bad
+    for i, acc in enumerate(Config.ACCOUNTS):
+        req = urllib.request.Request(
+            f"{Config.HETZNER_API_BASE}/servers",
+            headers={"Authorization": f"Bearer {acc['token']}"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=15)
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                msg = f"❌ Hetzner token for account '{acc['name']}' is invalid (401)."
+                if i == 0:
+                    sys.exit(msg + "\nFix it in .env (or via `hetzner accounts`), then restart.")
+                logging.warning(msg)
+            else:
+                logging.warning(f"Account '{acc['name']}': Hetzner API returned HTTP {e.code}")
+        except Exception as e:
+            logging.warning(f"Could not verify account '{acc['name']}' (network issue?): {e}")
 
 
 def main():

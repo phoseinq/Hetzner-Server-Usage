@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from config import Config
-from hetzner_api import hetzner_api
+from hetzner_api import all_apis, account_count
 from overage_tracker import overage_tracker
 from utils import format_traffic, get_traffic_emoji
 
@@ -34,14 +34,17 @@ async def traffic_monitor(bot):
     state = _load_state()
 
     try:
-        servers = await hetzner_api.list_servers()
-        if not servers:
-            logger.warning("No servers found during monitor check")
-            return
+        multi = account_count() > 1
+        for _idx, acct_name, api in all_apis():
+          servers = await api.list_servers()
+          if not servers:
+            continue
 
-        for server in servers:
+          for server in servers:
             server_id = str(server.get('id'))
             server_name = server.get('name', 'Unnamed')
+            if multi:
+                server_name = f"{server_name}  ·  {acct_name}"
             traffic_bytes = server.get('outgoing_traffic', 0)
             traffic_tb = traffic_bytes / (1024 ** 4)
             usage_pct = (traffic_bytes / Config.TRAFFIC_LIMIT_BYTES) * 100

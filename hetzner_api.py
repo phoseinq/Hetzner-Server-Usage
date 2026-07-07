@@ -1,5 +1,6 @@
 import aiohttp
 import asyncio
+import contextvars
 import logging
 import time
 from config import Config
@@ -22,10 +23,10 @@ RATE_LIMIT_SOFT_FLOOR = 200         # slow down when fewer requests remain
 
 
 class HetznerAPI:
-    def __init__(self):
+    def __init__(self, token):
         self.base_url = Config.HETZNER_API_BASE
         self.headers = {
-            'Authorization': f'Bearer {Config.HETZNER_API_TOKEN}',
+            'Authorization': f'Bearer {token}',
             'Content-Type': 'application/json'
         }
         self._throttle_lock = asyncio.Lock()
@@ -255,4 +256,39 @@ class HetznerAPI:
         logger.warning(f"Server {server_id} did not reach {target_status} in time")
         return False
 
-hetzner_api = HetznerAPI()
+# One client per Hetzner account (separate token, cache and throttle each).
+APIS = [HetznerAPI(a['token']) for a in Config.ACCOUNTS] or [HetznerAPI(Config.HETZNER_API_TOKEN)]
+_current = contextvars.ContextVar('hz_account', default=0)
+
+
+def set_account(i):
+    _current.set(max(0, min(int(i), len(APIS) - 1)))
+
+
+def current_account():
+    return _current.get()
+
+
+def account_count():
+    return len(APIS)
+
+
+def account_name(i):
+    if 0 <= i < len(Config.ACCOUNTS):
+        return Config.ACCOUNTS[i]['name']
+    return f'Account {i + 1}'
+
+
+def all_apis():
+    # (index, name, client) for every account — used by cost report & monitor
+    return [(i, account_name(i), api) for i, api in enumerate(APIS)]
+
+
+class _AccountProxy:
+    """Routes hetzner_api.* to the account selected for the current update.
+    Lets existing call sites stay unchanged while supporting many accounts."""
+    def __getattr__(self, name):
+        return getattr(APIS[_current.get()], name)
+
+
+hetzner_api = _AccountProxy()
