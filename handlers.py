@@ -1084,24 +1084,41 @@ async def _server_datacenter(server):
 
 
 async def _resize_candidates(server):
-    """Server types actually available in this server's datacenter,
-    same architecture, not deprecated, excluding the current type."""
+    """Every plan this server can actually be moved to.
+
+    What the datacenter lists as `available_for_migration` is not a filter
+    here: the API accepts plans that list leaves out, which is the same route
+    the traffic reset takes. Those are offered and marked, rather than
+    hidden. Only the two limits Hetzner really enforces are applied —
+    architecture cannot change (the disk image would not boot) and a
+    deprecated plan cannot be moved to.
+    """
     types, dc = await asyncio.gather(
         hetzner_api.get_server_types(),
         _server_datacenter(server),
     )
-    avail = set()
-    if dc:
-        st = dc.get("server_types", {})
-        avail = set(st.get("available_for_migration") or st.get("available") or [])
+    st = (dc or {}).get("server_types", {})
+    listed = set(st.get("available_for_migration") or st.get("available") or [])
     cur = server.get("server_type", {})
-    return [
+    candidates = [
         t for t in types
-        if t.get("id") in avail
-        and t.get("architecture") == cur.get("architecture")
+        if t.get("architecture") == cur.get("architecture")
         and not t.get("deprecation")
         and t.get("name") != cur.get("name")
     ]
+    for t in candidates:
+        t["_listed"] = t.get("id") in listed
+    return candidates
+
+
+def _resize_flags(t, cur):
+    """(marker, warning) for a plan the datacenter would not normally offer."""
+    marks = ""
+    if not t.get("_listed"):
+        marks += " 🔓"
+    if (t.get("disk", 0) or 0) < (cur.get("disk", 0) or 0):
+        marks += " 💾"
+    return marks
 
 
 async def resize_pick_family(query, context, server_id):
@@ -1111,8 +1128,8 @@ async def resize_pick_family(query, context, server_id):
         return
     candidates = await _resize_candidates(server)
     if not candidates:
-        await _edit(query, 
-            "⚠️ No other plans are available for this server in its datacenter.",
+        await _edit(query,
+            "⚠️ No other plans exist for this server's architecture.",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅️ Back to Server", callback_data=f"server_{server_id}")]]
             ),
@@ -1132,7 +1149,8 @@ async def resize_pick_family(query, context, server_id):
         f"⚖️ *Change Plan*\n\n"
         f"Server: `{server.get('name')}`\n"
         f"Current: `{cur.get('name')}` ({cur.get('cores')}C / {cur.get('memory'):.0f}GB / {cur.get('disk')}GB)\n\n"
-        f"Choose a CPU family (only plans *available in this datacenter* are shown):",
+        f"Choose a CPU family — every plan is offered, including the ones this "
+        f"datacenter does not normally list:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
@@ -1148,29 +1166,42 @@ async def resize_pick_type(query, context, server_id, family):
     candidates.sort(key=lambda t: (t.get("cores", 0), t.get("memory", 0)))
     cur = server.get("server_type", {})
     keyboard = []
+    any_unlisted = any_small_disk = False
     for t in candidates:
         arrow = "🔼" if t.get("memory", 0) > cur.get("memory", 0) else "🔽"
+        marks = _resize_flags(t, cur)
+        any_unlisted = any_unlisted or "🔓" in marks
+        any_small_disk = any_small_disk or "💾" in marks
         keyboard.append([InlineKeyboardButton(
-            f"{arrow} {t['name']} | {t.get('cores')}C / {t.get('memory'):.0f}GB / {t.get('disk')}GB | €{_type_price(t, loc):.2f}",
+            f"{arrow} {t['name']} | {t.get('cores')}C / {t.get('memory'):.0f}GB / {t.get('disk')}GB | €{_type_price(t, loc):.2f}{marks}",
             callback_data=f"resizet_{server_id}_{t['name']}",
         )])
     keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data=f"resize_{server_id}")])
-    await _edit(query, 
+    legend = ""
+    if any_unlisted:
+        legend += "\n🔓 not listed for this datacenter — the API still accepts it"
+    if any_small_disk:
+        legend += "\n💾 smaller disk than the server has now — Hetzner will refuse this one"
+    await _edit(query,
         f"⚖️ *Change Plan* — {_FAMILY_LABEL.get(family, family.upper())}\n\n"
-        f"Current: `{cur.get('name')}`\n\nChoose the new plan:",
+        f"Current: `{cur.get('name')}` ({cur.get('cores')}C / {cur.get('memory'):.0f}GB / "
+        f"{cur.get('disk')}GB)\n{legend}\n\nChoose the new plan:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
 
 
 async def resize_confirm(query, context, server_id, new_type_name):
-    server, types = await asyncio.gather(
-        hetzner_api.get_server(server_id),
-        hetzner_api.get_server_types(),
+    server = await hetzner_api.get_server(server_id)
+    if not server:
+        await _edit(query, "⚠️ Server not found or API error.")
+        return
+    # from the candidate list, so the datacenter-listing flag comes with it
+    new_type = next(
+        (t for t in await _resize_candidates(server) if t.get("name") == new_type_name), None
     )
-    new_type = next((t for t in types if t.get("name") == new_type_name), None)
-    if not server or not new_type:
-        await _edit(query, "⚠️ Server or plan not found.")
+    if not new_type:
+        await _edit(query, "⚠️ Plan not found.")
         return
     cur = server.get("server_type", {})
     loc = location_name(server)
@@ -1183,6 +1214,16 @@ async def resize_confirm(query, context, server_id, new_type_name):
         f"{new_type.get('disk')}GB — €{_type_price(new_type, loc):.2f}\n\n"
         f"⚠️ The server will be powered off during the change.\n"
     )
+    if not new_type.get("_listed"):
+        text += (
+            "\n🔓 This datacenter does not list this plan for migration. The API "
+            "takes it anyway — the same route the traffic reset uses.\n"
+        )
+    if (new_type.get("disk", 0) or 0) < (cur.get("disk", 0) or 0):
+        text += (
+            "\n💾 This plan's disk is smaller than the server's. Hetzner refuses "
+            "to shrink a disk, so this change will most likely fail.\n"
+        )
     keyboard = [[InlineKeyboardButton(
         "✅ Change (CPU/RAM only — can downgrade later)",
         callback_data=f"resizego_{server_id}_{new_type_name}_0",

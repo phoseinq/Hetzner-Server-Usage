@@ -31,7 +31,7 @@ A Telegram bot that lets you monitor and manage all your Hetzner Cloud servers f
 - 🔑 **Reset Password** — Generate a new root password via Hetzner API
 - 📸 **Snapshots** — Take, list and delete server snapshots from the bot
 - 🔧 **Rebuild OS** — Reinstall any OS image (filtered by server architecture)
-- ⚖️ **Change Plan** — Upgrade/downgrade across CPU families (Intel/AMD/ARM/Dedicated); only plans available in the server's datacenter are offered
+- ⚖️ **Change Plan** — Upgrade/downgrade across CPU families (Intel/AMD/ARM/Dedicated). Every plan is offered, including ones the datacenter does not list for migration — the API accepts them anyway, and they are marked 🔓 so you know which. Plans with a smaller disk than the server has are marked 💾, since Hetzner will refuse those
 - 💽 **Volumes** — Create, attach, detach and delete volumes per server
 - 💾 **Backups** — Enable/disable Hetzner backups per server
 - 🌐 **Floating & Primary IPs** — Create and delete IPs in bulk with multi-select; attach/detach floating IPs to servers
@@ -239,7 +239,7 @@ MIT — see [LICENSE](LICENSE) for details.
 - 🔑 **ریست پسورد** — تولید پسورد root جدید از طریق API هتزنر
 - 📸 **اسنپ‌شات** — گرفتن، مشاهده و حذف اسنپ‌شات سرورها از داخل ربات
 - 🔧 **ریبیلد سیستم‌عامل** — نصب مجدد هر ایمیج (فیلترشده بر اساس معماری سرور)
-- ⚖️ **تغییر پلن** — ارتقا/داونگرید بین خانواده‌های CPU (اینتل/AMD/ARM/اختصاصی)؛ فقط پلن‌های موجود در دیتاسنتر همون سرور نشون داده میشه
+- ⚖️ **تغییر پلن** — ارتقا/داونگرید بین خانواده‌های CPU (اینتل/AMD/ARM/اختصاصی). همه‌ی پلن‌ها نشون داده میشن، حتی اونهایی که دیتاسنتر برای مهاجرت لیست نکرده — API قبولشون می‌کنه و با 🔓 علامت می‌خورن. پلن‌هایی که دیسکشون از دیسک فعلی سرور کوچیک‌تره با 💾 مشخص میشن چون هتزنر ردشون می‌کنه
 - 💽 **ولوم** — ساخت، اتصال، جداسازی و حذف ولوم برای هر سرور
 - 💾 **بکاپ** — روشن/خاموش کردن بکاپ هتزنر برای هر سرور
 - 🌐 **IP های Floating و Primary** — ساخت و حذف گروهی IP ها با انتخاب چندتایی؛ اتصال/قطع Floating IP به سرورها
