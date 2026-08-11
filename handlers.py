@@ -515,7 +515,6 @@ async def show_overage_cost(query, context):
     total_server_cost = backup_cost = 0
     backup_count = 0
     snap_size = floating_cost = 0
-    unassigned_pips = []
     assigned_pip_count = 0
     vol_size = 0
     snap_count = fip_count = vol_count = 0
@@ -523,19 +522,26 @@ async def show_overage_cost(query, context):
     pricing = {}
     any_servers = False
 
+    snapshot_cost = extra_primary_cost = volume_cost = 0
+    unassigned_pip_count = 0
+    vat_amount = 0
+    vat_rates = set()
+
     for idx, name, api in all_apis():
         servers, pr, snapshots, floating_ips, primary_ips, volumes = await asyncio.gather(
             api.list_servers(), api.get_pricing(), api.list_images(),
             api.list_floating_ips(), api.list_primary_ips(), api.list_volumes(),
         )
+        pr = pr or {}
         pricing = pr or pricing
         if servers:
             any_servers = True
         try:
-            backup_pct = float((pr or {}).get("server_backup", {}).get("percentage", 20) or 20)
+            backup_pct = float(pr.get("server_backup", {}).get("percentage", 20) or 20)
         except (TypeError, ValueError):
             backup_pct = 20.0
 
+        acct_cost = 0
         if multi and servers:
             server_details.append(f"\n🔑 *{name}*")
         for s in servers:
@@ -544,26 +550,49 @@ async def show_overage_cost(query, context):
             limit_tb = traffic_limit_tb(s)
             sp = _server_price(s)
             total_server_cost += sp
+            acct_cost += sp
             overage_tracker.update_live_overage(s["id"], overage_cost(s))
             ov_month = overage_tracker.get_server_month_overage(s["id"])
+            acct_cost += ov_month
             edited = " ✏️" if price_store.get(s["id"]) is not None else ""
             line = f"• `{sname}` ({stype}): €{sp:.2f}{edited} | {format_traffic(s.get('outgoing_traffic', 0), limit_tb)}"
             if s.get("backup_window"):
                 backup_count += 1
                 backup_cost += sp * backup_pct / 100
+                acct_cost += sp * backup_pct / 100
                 line += " | 💾"
             if ov_month > 0:
                 line += f" | ⚠️ €{ov_month:.2f} overage"
             server_details.append(line)
 
-        snap_size += sum(i.get("image_size") or 0 for i in snapshots)
+        # every rate below is this account's own, so an account that is not
+        # charged VAT does not inherit another account's rate
+        acct_snap_size = sum(i.get("image_size") or 0 for i in snapshots)
+        acct_snapshot_cost = acct_snap_size * _image_price_per_gb(pr)
+        acct_floating = sum(_floating_ip_price(pr, f) for f in floating_ips)
+        acct_unassigned = [p for p in primary_ips if not p.get("assignee_id")]
+        acct_pip_cost = sum(_primary_ip_price(pr, p) for p in acct_unassigned)
+        acct_vol_size = sum(v.get("size") or 0 for v in volumes)
+        acct_volume_cost = acct_vol_size * _net(
+            pr.get("volume", {}).get("price_per_gb_month", {}) or pr.get("volume", {})
+        )
+        acct_cost += acct_snapshot_cost + acct_floating + acct_pip_cost + acct_volume_cost
+
+        rate = _vat_rate(pr)
+        vat_rates.add(rate)
+        vat_amount += acct_cost * rate / 100
+
+        snap_size += acct_snap_size
         snap_count += len(snapshots)
-        floating_cost += sum(_floating_ip_price(pr or {}, f) for f in floating_ips)
+        snapshot_cost += acct_snapshot_cost
+        floating_cost += acct_floating
         fip_count += len(floating_ips)
         assigned_pip_count += len([p for p in primary_ips if p.get("assignee_id")])
-        unassigned_pips += [p for p in primary_ips if not p.get("assignee_id")]
-        vol_size += sum(v.get("size") or 0 for v in volumes)
+        unassigned_pip_count += len(acct_unassigned)
+        extra_primary_cost += acct_pip_cost
+        vol_size += acct_vol_size
         vol_count += len(volumes)
+        volume_cost += acct_volume_cost
 
     if not any_servers:
         await _edit(query, "⚠️ No servers found or API error occurred.")
@@ -572,11 +601,6 @@ async def show_overage_cost(query, context):
     monthly_overage = overage_tracker.get_current_month_overage()
     total_historic = overage_tracker.get_total_overage()
     monthly_breakdown = overage_tracker.get_monthly_breakdown()
-
-    snapshot_cost = snap_size * _image_price_per_gb(pricing)
-    extra_primary_cost = sum(_primary_ip_price(pricing, p) for p in unassigned_pips)
-    vol_per_gb = _net(pricing.get("volume", {}).get("price_per_gb_month", {}) or pricing.get("volume", {}))
-    volume_cost = vol_size * vol_per_gb
 
     total_usage = (
         total_server_cost + monthly_overage + backup_cost
@@ -588,11 +612,13 @@ async def show_overage_cost(query, context):
     projected_overage = monthly_overage / now.day * days_in_month
 
     primary_line = f"📍 Primary IPs: {assigned_pip_count} on servers (free)"
-    if unassigned_pips:
-        primary_line += f" | {len(unassigned_pips)} unassigned → €{extra_primary_cost:.2f}"
+    if unassigned_pip_count:
+        primary_line += f" | {unassigned_pip_count} unassigned → €{extra_primary_cost:.2f}"
 
-    vat_rate = _vat_rate(pricing)
-    vat_amount = total_usage * vat_rate / 100
+    # one label only when every account is charged the same; mixed accounts
+    # get the amount without a rate, because no single rate describes it
+    charged = sorted(r for r in vat_rates if r)
+    vat_label = f"VAT {charged[0]:.0f}%" if len(set(charged)) == 1 else "VAT"
     text = (
         f"💸 *COST REPORT*\n\n"
         f"📦 *Servers (This Month)*\n" + "\n".join(server_details) + "\n\n"
@@ -610,11 +636,11 @@ async def show_overage_cost(query, context):
         f"💾 Backups: €{backup_cost:.2f}\n"
         f"🌐 Floating IPs: €{floating_cost:.2f}\n"
     )
-    if unassigned_pips:
+    if unassigned_pip_count:
         text += f"📍 Extra primary IPs: €{extra_primary_cost:.2f}\n"
-    text += f"🧾 Subtotal: €{total_usage:.2f}\n"
-    if vat_rate:
-        text += f"➕ VAT {vat_rate:.0f}%: €{vat_amount:.2f}\n"
+    if vat_amount:
+        text += f"🧾 Subtotal: €{total_usage:.2f}\n"
+        text += f"➕ {vat_label}: €{vat_amount:.2f}\n"
     text += f"💰 *Total: €{total_usage + vat_amount:.2f}*\n\n"
     if monthly_overage > 0:
         text += (
@@ -626,8 +652,18 @@ async def show_overage_cost(query, context):
         text += "\n*Monthly History:*\n"
         for month, cost in monthly_breakdown[:6]:
             text += f"• {month}: €{cost:.2f}\n"
-    if vat_rate:
-        text += f"\n_Every price above is net; the {vat_rate:.0f}% VAT Hetzner reports for this account is added once, in the total._\n"
+    if vat_amount and multi:
+        text += (
+            "\n_Every price above is net. VAT is added once per account, at the rate "
+            "Hetzner reports for each — accounts it reports no VAT for are billed net._\n"
+        )
+    elif vat_amount:
+        text += (
+            f"\n_Every price above is net; {vat_label} is the rate Hetzner reports for "
+            "this account, added once in the total._\n"
+        )
+    else:
+        text += "\n_Hetzner reports no VAT for this account, so the total is net._\n"
     if price_store.all():
         text += "_✏️ marks a price set by hand in the server's own panel._\n"
     text += f"\n🕓 Updated: `{now.strftime('%H:%M:%S')}`"
