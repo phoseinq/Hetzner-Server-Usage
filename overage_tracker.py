@@ -88,6 +88,16 @@ class OverageTracker:
         entry = data.setdefault('months', {}).setdefault(month or self._now_month(), {})
         return entry.setdefault('servers', {}), entry
 
+    @staticmethod
+    def _write_off(servers, entry, sid):
+        """Move what this server owes this month into `avoided`."""
+        owed = servers.pop(sid, 0)
+        if owed:
+            avoided = entry.setdefault('avoided', {})
+            avoided[sid] = round(avoided.get(sid, 0) + owed, 2)
+            entry['updated_at'] = datetime.now().isoformat()
+        return owed
+
     def update_live_overage(self, server_id, overage_cost):
         """Book whatever overage accrued since the last reading."""
         sid = str(server_id)
@@ -95,33 +105,48 @@ class OverageTracker:
         last_seen = data.setdefault('last_seen', {})
         previous = last_seen.get(sid, 0) or 0
         current = max(0.0, round(overage_cost, 2))
+        servers, entry = self._month_servers(data)
 
         if current + 1e-6 < previous:
-            # counter went back down => a new traffic cycle started
-            logger.info(f"Server {sid}: traffic reset detected (€{previous:.2f} -> €{current:.2f})")
+            # the counter went back down, so the cycle ended: either a reset
+            # done outside the bot, or Hetzner's own monthly one. Nothing on
+            # the old counter gets billed, so this month stops owing it —
+            # amounts booked to an earlier month stay put, they were charged.
+            owed = self._write_off(servers, entry, sid)
+            logger.info(
+                f"Server {sid}: traffic reset detected (€{previous:.2f} -> €{current:.2f})"
+                + (f", €{owed:.2f} written off" if owed else "")
+            )
             delta = current
         else:
             delta = current - previous
 
         last_seen[sid] = current
         if delta > 0:
-            servers, entry = self._month_servers(data)
             servers[sid] = round(servers.get(sid, 0) + delta, 2)
             entry['updated_at'] = datetime.now().isoformat()
         self._save_data(data)
 
     def commit_overage(self, server_id):
-        """Finalize before a traffic reset the bot performs itself.
+        """Write this month's overage off, ahead of a traffic reset.
 
-        Deltas are booked as they are read, so the cost is already recorded;
-        this only clears the baseline so the post-reset counter is not read as
-        a drop twice.
+        Resetting the counter is what stops Hetzner billing the overage, so
+        once it is done the amount is no longer owed and must leave the
+        month's total — otherwise the cost report keeps invoicing, and
+        warning about, money that will never be charged. It is kept under
+        `avoided` so the report can still show what the resets saved.
         """
+        sid = str(server_id)
         data = self._load_data()
-        data.setdefault('last_seen', {})[str(server_id)] = 0
+        servers, entry = self._month_servers(data)
+        owed = self._write_off(servers, entry, sid)
+        if owed:
+            logger.info(f"Server {sid}: €{owed:.2f} overage written off by traffic reset")
+        data.setdefault('last_seen', {})[sid] = 0
         self._save_data(data)
 
     def get_server_month_overage(self, server_id):
+        """What this server still owes this month, after any resets."""
         data = self._load_data()
         servers, _ = self._month_servers(data)
         return round(servers.get(str(server_id), 0), 2)
@@ -144,6 +169,18 @@ class OverageTracker:
         servers, _ = self._month_servers(data)
         return round(sum(servers.values()), 2)
 
+    def get_current_month_avoided(self):
+        """Overage this month that a traffic reset cancelled before billing."""
+        data = self._load_data()
+        _, entry = self._month_servers(data)
+        return round(sum(entry.get('avoided', {}).values()), 2)
+
+    def get_total_avoided(self):
+        data = self._load_data()
+        return round(sum(
+            sum(m.get('avoided', {}).values()) for m in data.get('months', {}).values()
+        ), 2)
+
 
 overage_tracker = OverageTracker()
 
@@ -158,12 +195,28 @@ def demo():
     t.update_live_overage(1, 2.0)
     t.update_live_overage(1, 5.0)
     assert t.get_server_month_overage(1) == 5.0, t.get_server_month_overage(1)
-    # a traffic reset must not re-bill what was already counted
+    # resetting the traffic is what stops Hetzner billing it, so the month
+    # stops owing it and the warning clears
     t.update_live_overage(1, 0.0)
+    assert t.get_server_month_overage(1) == 0, "reset must clear what is owed"
+    assert t.get_current_month_avoided() == 5.0
+    # ...and new traffic after the reset starts accruing again from zero
     t.update_live_overage(1, 1.5)
-    assert t.get_server_month_overage(1) == 6.5
-    assert t.get_current_month_overage() == 6.5
-    assert t.get_total_overage() == 6.5
+    assert t.get_server_month_overage(1) == 1.5
+    assert t.get_current_month_overage() == 1.5
+    assert t.get_total_overage() == 1.5
+    assert t.get_total_avoided() == 5.0
+
+    # the bot's own reset writes off before touching the server, so the
+    # counter dropping to zero afterwards must not double-count anything
+    t.update_live_overage(1, 4.0)
+    assert t.get_server_month_overage(1) == 4.0
+    t.commit_overage(1)
+    assert t.get_server_month_overage(1) == 0
+    assert t.get_current_month_avoided() == 9.0
+    t.update_live_overage(1, 0.0)
+    assert t.get_server_month_overage(1) == 0
+    assert t.get_current_month_avoided() == 9.0, "written off twice"
 
     # the reported bug: July ends at 9.15, the counter keeps running into
     # August and is only reset later. August must be billed 0.20, not 9.35.
@@ -186,6 +239,12 @@ def demo():
     t3.update_live_overage(7, 4.6)          # counter carried across the boundary
     assert t3.get_server_month_overage(7) == 0.6, t3.get_server_month_overage(7)
     assert t3.get_total_overage() == 4.6
+    # Hetzner's own reset at the month boundary must not wipe the previous
+    # month: that overage was really billed, only the new month goes to zero
+    t3.update_live_overage(7, 0.0)
+    assert t3.get_server_month_overage(7) == 0
+    assert dict(t3.get_monthly_breakdown())['1999-01'] == 4.0, "billed month was wiped"
+    assert t3.get_total_avoided() == 0.6
     print('overage_tracker demo OK')
 
 

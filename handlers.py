@@ -599,7 +599,9 @@ async def show_overage_cost(query, context):
         return
 
     monthly_overage = overage_tracker.get_current_month_overage()
+    monthly_avoided = overage_tracker.get_current_month_avoided()
     total_historic = overage_tracker.get_total_overage()
+    total_avoided = overage_tracker.get_total_avoided()
     monthly_breakdown = overage_tracker.get_monthly_breakdown()
 
     total_usage = (
@@ -647,7 +649,15 @@ async def show_overage_cost(query, context):
             f"🔮 *Projected Month-End Overage*\n"
             f"~€{projected_overage:.2f} at the current usage rate\n\n"
         )
-    text += f"🔴 *Total Overage Loss (All Time)*\n€{total_historic:.2f}\n"
+    if monthly_avoided:
+        text += (
+            f"♻️ *Saved by Traffic Resets*\n"
+            f"€{monthly_avoided:.2f} this month is not billed — the counter was reset "
+            f"before Hetzner charged it.\n\n"
+        )
+    text += f"🔴 *Total Overage Paid (All Time)*\n€{total_historic:.2f}\n"
+    if total_avoided:
+        text += f"♻️ *Total Saved by Resets*\n€{total_avoided:.2f}\n"
     if monthly_breakdown and len(monthly_breakdown) > 1:
         text += "\n*Monthly History:*\n"
         for month, cost in monthly_breakdown[:6]:

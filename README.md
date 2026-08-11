@@ -158,9 +158,12 @@ When you tap **Reset Traffic**, the bot:
 | 4 | Downgrades back to the original plan |
 | 5 | ✅ Traffic counter is reset |
 
-> Before the reset starts, any overage cost from the current cycle is saved
-> to the cost history (`overage_history.json`) — resetting no longer wipes
-> it from the **Cost Report**.
+> Resetting the counter is what stops Hetzner billing the overage, so the
+> amount stops being owed: it leaves this month's total in the **Cost
+> Report** and its ⚠️ clears. It is not thrown away — it moves to *Saved by
+> Traffic Resets* in `overage_history.json`, so you can still see what the
+> resets saved you. A reset done outside the bot is detected on the next
+> hourly check and handled the same way.
 
 ---
 
@@ -362,9 +365,12 @@ hetzner uninstall    # حذف سرویس (قبل از حذف دیتا می‌پ�
 | ۴ | به پلن اصلی برمی‌گرده |
 | ۵ | ✅ کانتر ترافیک ریست میشه |
 
-> قبل از شروع ریست، هزینه اضافه‌مصرف این دوره توی تاریخچه هزینه
-> (`overage_history.json`) ذخیره میشه — دیگه با ریست، عدد **Cost Report**
-> از بین نمیره.
+> ریست کردن شمارنده همون کاریه که جلوی صورتحساب هتزنر رو می‌گیره، پس اون
+> هزینه دیگه بدهی شما نیست: از جمع این ماه توی **Cost Report** خارج میشه و
+> علامت ⚠️ هم پاک میشه. البته دور ریخته نمیشه — میره به بخش *Saved by
+> Traffic Resets* توی `overage_history.json` تا ببینید ریست‌ها چقدر براتون
+> صرفه‌جویی کردن. ریستی که بیرون از ربات بزنید هم توی چک ساعتی بعدی
+> تشخیص داده میشه و همین‌طور حساب میشه.
 
 ---
 

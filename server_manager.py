@@ -48,13 +48,15 @@ async def reset_server_traffic(server_id, progress_callback=None):
         
         await add_log("🔼", f"Upgrade plan selected: {upgrade_type}")
 
-        # the reset wipes the traffic counter, so persist this cycle's
-        # overage cost before touching the server
+        # resetting the counter is what stops Hetzner billing the overage, so
+        # settle it now: it leaves this month's bill and is recorded as saved
         overage = overage_cost(server)
         if overage > 0:
             overage_tracker.update_live_overage(server_id, overage)
-            overage_tracker.commit_overage(server_id)
-            await add_log("💾", f"Overage cost €{overage:.2f} saved to cost history")
+        owed = overage_tracker.get_server_month_overage(server_id)
+        overage_tracker.commit_overage(server_id)
+        if owed:
+            await add_log("💰", f"€{owed:.2f} overage cleared from this month's bill")
 
         if current_status == "running":
             await add_log("🔴", "Shutting down server...")
