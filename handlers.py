@@ -1084,14 +1084,12 @@ async def _server_datacenter(server):
 
 
 async def _resize_candidates(server):
-    """Every plan this server can actually be moved to.
+    """Every plan this server can be moved to.
 
-    What the datacenter lists as `available_for_migration` is not a filter
-    here: the API accepts plans that list leaves out, which is the same route
-    the traffic reset takes. Those are offered and marked, rather than
-    hidden. Only the two limits Hetzner really enforces are applied —
-    architecture cannot change (the disk image would not boot) and a
-    deprecated plan cannot be moved to.
+    Filtered on what actually blocks a change: architecture has to match, or
+    the disk image would not boot, and a deprecated plan cannot be a target.
+    The datacenter's migration list is read for labelling only — plans
+    outside it are flagged for the caller, not removed.
     """
     types, dc = await asyncio.gather(
         hetzner_api.get_server_types(),
@@ -1112,7 +1110,7 @@ async def _resize_candidates(server):
 
 
 def _resize_flags(t, cur):
-    """(marker, warning) for a plan the datacenter would not normally offer."""
+    """Markers for a plan that needs a second look before picking it."""
     marks = ""
     if not t.get("_listed"):
         marks += " 🔓"
@@ -1179,7 +1177,7 @@ async def resize_pick_type(query, context, server_id, family):
     keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data=f"resize_{server_id}")])
     legend = ""
     if any_unlisted:
-        legend += "\n🔓 not listed for this datacenter — the API still accepts it"
+        legend += "\n🔓 outside this datacenter's usual list"
     if any_small_disk:
         legend += "\n💾 smaller disk than the server has now — Hetzner will refuse this one"
     await _edit(query,
@@ -1215,10 +1213,7 @@ async def resize_confirm(query, context, server_id, new_type_name):
         f"⚠️ The server will be powered off during the change.\n"
     )
     if not new_type.get("_listed"):
-        text += (
-            "\n🔓 This datacenter does not list this plan for migration. The API "
-            "takes it anyway — the same route the traffic reset uses.\n"
-        )
+        text += "\n🔓 This plan is outside this datacenter's usual list.\n"
     if (new_type.get("disk", 0) or 0) < (cur.get("disk", 0) or 0):
         text += (
             "\n💾 This plan's disk is smaller than the server's. Hetzner refuses "

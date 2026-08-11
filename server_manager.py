@@ -8,18 +8,13 @@ logger = logging.getLogger(__name__)
 
 
 def pick_upgrade_type(types, current, location):
-    """Cheapest plan worth bouncing through to reset the traffic counter.
-
-    NOTE: this deliberately does not look at what the datacenter reports as
-    available. The API accepts a type change the console would refuse, and
-    that is the whole reason the traffic reset works — Change Plan filters on
-    availability, this must not, or there is nothing to bounce through.
+    """Cheapest plan to pass through on the way to resetting the counter.
 
     The target has to be at least as big as the current plan in every
     dimension, disk included: the change runs with upgrade_disk=False so the
-    disk is never grown, and Hetzner refuses a type whose disk is smaller
-    than the server already has. Same family is preferred, so the plan the
-    server sits on for those two minutes stays close to what it was.
+    disk is never grown, and a type whose disk is smaller than the server
+    already has is not a valid target. Same family is preferred, so the plan
+    the server sits on for those two minutes stays close to what it was.
     """
     cores, memory, disk = (current.get(k, 0) or 0 for k in ('cores', 'memory', 'disk'))
 
@@ -215,8 +210,7 @@ def demo():
     # nothing bigger => the caller is told, rather than picking something wrong
     assert pick_upgrade_type(TYPES, by['cpx42'], 'hel1') is None
 
-    # availability is not an input at all: cx23 -> cx33 is exactly the case
-    # Hetzner lists as unavailable, and it must still be chosen
+    # the choice depends on the type list alone, nothing per-datacenter
     assert 'available' not in pick_upgrade_type.__code__.co_varnames
     print('server_manager demo OK')
 
