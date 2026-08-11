@@ -10,6 +10,7 @@ from hetzner_api import hetzner_api, set_account, account_count, account_name, a
 from utils import (
     format_traffic, get_traffic_emoji, get_location_info,
     get_location, location_name, traffic_limit_tb,
+    traffic_price_per_tb, overage_cost,
 )
 from server_manager import reset_server_traffic
 from overage_tracker import overage_tracker
@@ -37,9 +38,17 @@ async def _edit(query, text, **kwargs):
             pass
 
 
-def _gross(price_dict):
+def _net(price_dict):
+    """Price before VAT. VAT is added once, at the end of the cost report."""
     try:
-        return float(price_dict.get("gross", 0) or 0)
+        return float(price_dict.get("net", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _vat_rate(pricing):
+    try:
+        return float(pricing.get("vat_rate") or 0)
     except (TypeError, ValueError):
         return 0.0
 
@@ -59,7 +68,7 @@ def _server_price(server):
 
 
 def _image_price_per_gb(pricing):
-    return _gross(pricing.get("image", {}).get("price_per_gb_month", {}))
+    return _net(pricing.get("image", {}).get("price_per_gb_month", {}))
 
 
 def _floating_ip_price(pricing, fip):
@@ -68,8 +77,8 @@ def _floating_ip_price(pricing, fip):
         if entry.get("type") == fip.get("type"):
             for p in entry.get("prices", []):
                 if p.get("location") == loc:
-                    return _gross(p.get("price_monthly", {}))
-    return _gross(pricing.get("floating_ip", {}).get("price_monthly", {}))
+                    return _net(p.get("price_monthly", {}))
+    return _net(pricing.get("floating_ip", {}).get("price_monthly", {}))
 
 
 def _primary_ip_price(pricing, pip):
@@ -78,7 +87,7 @@ def _primary_ip_price(pricing, pip):
         if entry.get("type") == pip.get("type"):
             for p in entry.get("prices", []):
                 if p.get("location") == loc:
-                    return _gross(p.get("price_monthly", {}))
+                    return _net(p.get("price_monthly", {}))
     return 0.0
 
 
@@ -352,7 +361,7 @@ async def show_server_detail(query, context, server_id, refresh=False):
     limit_tb      = traffic_limit_tb(server)
     traffic_pct   = (traffic_tb / limit_tb) * 100
     emoji         = get_traffic_emoji(traffic_tb, limit_tb)
-    overage_tracker.update_live_overage(server_id, max(0, traffic_tb - limit_tb) * 1.0)
+    overage_tracker.update_live_overage(server_id, overage_cost(server))
     overage_eur   = overage_tracker.get_server_month_overage(server_id)
     ip     = server.get("public_net", {}).get("ipv4", {}).get("ip", "N/A")
     cores  = server.get("server_type", {}).get("cores", "N/A")
@@ -376,9 +385,9 @@ async def show_server_detail(query, context, server_id, refresh=False):
         f"🌐 IP: `{ip}`\n"
         f"{status_emoji} Status: `{status.upper()}`\n"
         f"💾 Backups: `{'ON' if backups_on else 'OFF'}`\n\n"
-        f"💰 *Pricing*\n"
+        f"💰 *Pricing* (excl. VAT)\n"
         f"📦 Server Cost: {monthly_price}\n"
-        f"📊 Overage This Month: `€{overage_eur:.2f}`\n\n"
+        f"📊 Overage This Month: `€{overage_eur:.2f}` (€{traffic_price_per_tb(server):.2f}/TB)\n\n"
         f"{emoji} *Traffic Usage*\n"
         f"📊 {format_traffic(traffic_bytes, limit_tb)} ({traffic_pct:.1f}%)\n"
     )
@@ -530,14 +539,12 @@ async def show_overage_cost(query, context):
         if multi and servers:
             server_details.append(f"\n🔑 *{name}*")
         for s in servers:
-            tb    = s.get("outgoing_traffic", 0) / (1024 ** 4)
             sname = s.get("name", "Unnamed")
             stype = s.get("server_type", {}).get("name", "?")
             limit_tb = traffic_limit_tb(s)
             sp = _server_price(s)
             total_server_cost += sp
-            ov = max(0, tb - limit_tb) * 1.0
-            overage_tracker.update_live_overage(s["id"], ov)
+            overage_tracker.update_live_overage(s["id"], overage_cost(s))
             ov_month = overage_tracker.get_server_month_overage(s["id"])
             edited = " ✏️" if price_store.get(s["id"]) is not None else ""
             line = f"• `{sname}` ({stype}): €{sp:.2f}{edited} | {format_traffic(s.get('outgoing_traffic', 0), limit_tb)}"
@@ -568,7 +575,7 @@ async def show_overage_cost(query, context):
 
     snapshot_cost = snap_size * _image_price_per_gb(pricing)
     extra_primary_cost = sum(_primary_ip_price(pricing, p) for p in unassigned_pips)
-    vol_per_gb = _gross(pricing.get("volume", {}).get("price_per_gb_month", {}) or pricing.get("volume", {}))
+    vol_per_gb = _net(pricing.get("volume", {}).get("price_per_gb_month", {}) or pricing.get("volume", {}))
     volume_cost = vol_size * vol_per_gb
 
     total_usage = (
@@ -584,6 +591,8 @@ async def show_overage_cost(query, context):
     if unassigned_pips:
         primary_line += f" | {len(unassigned_pips)} unassigned → €{extra_primary_cost:.2f}"
 
+    vat_rate = _vat_rate(pricing)
+    vat_amount = total_usage * vat_rate / 100
     text = (
         f"💸 *COST REPORT*\n\n"
         f"📦 *Servers (This Month)*\n" + "\n".join(server_details) + "\n\n"
@@ -593,7 +602,7 @@ async def show_overage_cost(query, context):
         f"💾 Backups ({backup_count} servers): €{backup_cost:.2f}\n"
         f"🌐 Floating IPs ({fip_count}): €{floating_cost:.2f}\n"
         f"{primary_line}\n\n"
-        f"📊 *Summary*\n"
+        f"📊 *Summary* (excl. VAT)\n"
         f"📦 Server costs: €{total_server_cost:.2f}\n"
         f"📈 Overage: €{monthly_overage:.2f}\n"
         f"📸 Snapshots: €{snapshot_cost:.2f}\n"
@@ -603,7 +612,10 @@ async def show_overage_cost(query, context):
     )
     if unassigned_pips:
         text += f"📍 Extra primary IPs: €{extra_primary_cost:.2f}\n"
-    text += f"💰 Total: €{total_usage:.2f}\n\n"
+    text += f"🧾 Subtotal: €{total_usage:.2f}\n"
+    if vat_rate:
+        text += f"➕ VAT {vat_rate:.0f}%: €{vat_amount:.2f}\n"
+    text += f"💰 *Total: €{total_usage + vat_amount:.2f}*\n\n"
     if monthly_overage > 0:
         text += (
             f"🔮 *Projected Month-End Overage*\n"
@@ -614,9 +626,8 @@ async def show_overage_cost(query, context):
         text += "\n*Monthly History:*\n"
         for month, cost in monthly_breakdown[:6]:
             text += f"• {month}: €{cost:.2f}\n"
-    vat = pricing.get("vat_rate")
-    if vat:
-        text += f"\n_Prices include {float(vat):.0f}% VAT, the rate Hetzner reports for this account._\n"
+    if vat_rate:
+        text += f"\n_Every price above is net; the {vat_rate:.0f}% VAT Hetzner reports for this account is added once, in the total._\n"
     if price_store.all():
         text += "_✏️ marks a price set by hand in the server's own panel._\n"
     text += f"\n🕓 Updated: `{now.strftime('%H:%M:%S')}`"
@@ -659,7 +670,8 @@ async def price_ask(update, context):
         text += f"Currently set to: `€{current:.2f}/month` ✏️\n"
     text += (
         "\nSend the monthly price you are actually billed for *this server*, "
-        "in EUR — e.g. `3.79`."
+        "in EUR and *without VAT* — e.g. `3.79`. VAT is added once, in the "
+        "cost report total."
     )
 
     keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data=f"pricecancel_{server_id}")]]
@@ -1012,9 +1024,9 @@ def _type_family(name):
 def _type_price(stype, location):
     for p in stype.get("prices", []):
         if p.get("location") == location:
-            return _gross(p.get("price_monthly", {}))
+            return _net(p.get("price_monthly", {}))
     prices = stype.get("prices", [])
-    return _gross(prices[0].get("price_monthly", {})) if prices else 0.0
+    return _net(prices[0].get("price_monthly", {})) if prices else 0.0
 
 
 async def _server_datacenter(server):
@@ -1209,7 +1221,7 @@ async def show_volumes(query, context, server_id):
         await _edit(query, "⚠️ Server not found or API error.")
         return
     loc = location_name(server)
-    per_gb = _gross(pricing.get("volume", {}).get("price_per_gb_month", {}) or pricing.get("volume", {}))
+    per_gb = _net(pricing.get("volume", {}).get("price_per_gb_month", {}) or pricing.get("volume", {}))
     attached = [v for v in volumes if v.get("server") == server_id]
     free = [v for v in volumes if not v.get("server") and v.get("location", {}).get("name") == loc]
 

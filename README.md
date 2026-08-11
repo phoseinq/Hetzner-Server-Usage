@@ -35,7 +35,8 @@ A Telegram bot that lets you monitor and manage all your Hetzner Cloud servers f
 - 💽 **Volumes** — Create, attach, detach and delete volumes per server
 - 💾 **Backups** — Enable/disable Hetzner backups per server
 - 🌐 **Floating & Primary IPs** — Create and delete IPs in bulk with multi-select; attach/detach floating IPs to servers
-- 💸 **Cost Report** — Per-server costs, snapshots, volumes, backups, floating/primary IPs, persisted overage history & month-end projection
+- 💸 **Cost Report** — Per-server costs, snapshots, volumes, backups, floating/primary IPs, persisted overage history & month-end projection. Every figure is net, with VAT added once in the total at the rate Hetzner reports for your account
+- 💰 **Edit Price** — Set what a server actually costs you from its own panel. The Hetzner API only reports today's list price, so a server ordered years ago on an older contract reports the wrong number; overrides are per server and stored in `price_overrides.json`
 - 🔑 **Multi-account** — Manage several Hetzner accounts from one bot; a picker keeps each account's servers separate and alerts name their account
 - 🛡 **Rate-limit friendly** — Requests are throttled and cached so the bot stays far below Hetzner's API limits
 - 🔐 **Admin Only** — Only you can access the bot
@@ -186,6 +187,7 @@ The bot checks traffic **every hour** automatically:
 ├── server_manager.py    Traffic reset logic
 ├── monitor.py           Hourly traffic monitor
 ├── overage_tracker.py   Cost history tracker
+├── price_store.py       Manual per-server price overrides
 ├── utils.py             Helper functions
 ├── install.sh           One-command installer (systemd)
 ├── hetzner-bot.service  systemd unit template
@@ -238,7 +240,8 @@ MIT — see [LICENSE](LICENSE) for details.
 - 💽 **ولوم** — ساخت، اتصال، جداسازی و حذف ولوم برای هر سرور
 - 💾 **بکاپ** — روشن/خاموش کردن بکاپ هتزنر برای هر سرور
 - 🌐 **IP های Floating و Primary** — ساخت و حذف گروهی IP ها با انتخاب چندتایی؛ اتصال/قطع Floating IP به سرورها
-- 💸 **گزارش هزینه** — هزینه هر سرور، اسنپ‌شات‌ها، ولوم‌ها، بکاپ‌ها، IP های Floating/Primary، تاریخچه ماندگار اضافه‌مصرف و پیش‌بینی آخر ماه
+- 💸 **گزارش هزینه** — هزینه هر سرور، اسنپ‌شات‌ها، ولوم‌ها، بکاپ‌ها، IP های Floating/Primary، تاریخچه ماندگار اضافه‌مصرف و پیش‌بینی آخر ماه. همه‌ی عددها بدون مالیاته و مالیات یک‌بار ته فاکتور اضافه میشه، با همون نرخی که هتزنر برای حساب شما گزارش می‌کنه
+- 💰 **ویرایش قیمت** — قیمت واقعی هر سرور رو از پنل خودش وارد کنید. API هتزنر فقط نرخ روز رو می‌ده، پس سروری که سال‌ها پیش با قرارداد قدیمی گرفتید عدد اشتباه نشون می‌ده؛ قیمت‌ها جدا برای هر سرور و توی `price_overrides.json` ذخیره میشن
 - 🛡 **رعایت محدودیت API** — درخواست‌ها فاصله‌گذاری و کش میشن تا همیشه خیلی پایین‌تر از سقف هتزنر بمونیم
 - 🔐 **فقط ادمین** — فقط شما به ربات دسترسی دارید
 

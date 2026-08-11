@@ -5,7 +5,7 @@ from pathlib import Path
 from config import Config
 from hetzner_api import all_apis, account_count
 from overage_tracker import overage_tracker
-from utils import format_traffic, get_traffic_emoji, traffic_limit_tb
+from utils import format_traffic, get_traffic_emoji, traffic_limit_tb, overage_cost
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +53,7 @@ async def traffic_monitor(bot):
 
             # keep the cost history current even if the cost report is
             # never opened; also detects resets done outside the bot
-            overage_tracker.update_live_overage(
-                server_id, max(0, traffic_tb - limit_tb) * 1.0
-            )
+            overage_tracker.update_live_overage(server_id, overage_cost(server))
 
             if server_id not in state:
                 state[server_id] = {

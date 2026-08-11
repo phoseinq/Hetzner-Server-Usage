@@ -66,6 +66,27 @@ def traffic_limit_tb(server):
     return Config.TRAFFIC_LIMIT_TB
 
 
+def traffic_price_per_tb(server):
+    """Net price of one TB over the included traffic, for this server.
+
+    Hetzner quotes it per location on the server type, so it is read from
+    there rather than assumed.
+    """
+    loc = location_name(server)
+    prices = (server or {}).get('server_type', {}).get('prices', [])
+    entry = next((p for p in prices if p.get('location') == loc), None) or (prices[0] if prices else {})
+    try:
+        return float(entry.get('price_per_tb_traffic', {}).get('net') or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def overage_cost(server):
+    """Net EUR currently owed for traffic beyond this server's allowance."""
+    tb = (server or {}).get('outgoing_traffic', 0) / (1024 ** 4)
+    return max(0.0, tb - traffic_limit_tb(server)) * traffic_price_per_tb(server)
+
+
 def format_traffic(bytes_value, limit_tb=None):
     limit = limit_tb if limit_tb else Config.TRAFFIC_LIMIT_TB
     tb = bytes_value / (1024 ** 4)
@@ -116,6 +137,21 @@ def demo():
     assert format_traffic(1024 ** 4, 1) == '1.00/1 TB'
     assert get_traffic_emoji(0.9, 1) == '🔴'
     assert get_traffic_emoji(0.9, 20) == '⚪'
+    # overage is priced net, at the rate quoted for the server's own location
+    srv = {
+        'location': {'name': 'hel1', 'country': 'FI'},
+        'included_traffic': 20 * 1024 ** 4,
+        'outgoing_traffic': 23 * 1024 ** 4,
+        'server_type': {'prices': [
+            {'location': 'fsn1', 'price_per_tb_traffic': {'net': '1.00', 'gross': '1.21'}},
+            {'location': 'hel1', 'price_per_tb_traffic': {'net': '2.50', 'gross': '3.03'}},
+        ]},
+    }
+    assert traffic_price_per_tb(srv) == 2.50
+    assert overage_cost(srv) == 7.5                      # 3 TB over at 2.50
+    srv['outgoing_traffic'] = 5 * 1024 ** 4
+    assert overage_cost(srv) == 0                        # under the allowance
+    assert traffic_price_per_tb({}) == 1.0               # no price data -> default
     print('utils demo OK')
 
 
