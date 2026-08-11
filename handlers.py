@@ -10,7 +10,7 @@ from hetzner_api import hetzner_api, set_account, account_count, account_name, a
 from utils import (
     format_traffic, get_traffic_emoji, get_location_info,
     get_location, location_name, traffic_limit_tb,
-    traffic_price_per_tb, overage_cost,
+    traffic_price_per_tb, overage_cost, type_family, type_price,
 )
 from server_manager import reset_server_traffic
 from overage_tracker import overage_tracker
@@ -1063,16 +1063,8 @@ _FAMILY_LABEL = {
 }
 
 
-def _type_family(name):
-    return "".join(c for c in name if c.isalpha()).lower()
-
-
-def _type_price(stype, location):
-    for p in stype.get("prices", []):
-        if p.get("location") == location:
-            return _net(p.get("price_monthly", {}))
-    prices = stype.get("prices", [])
-    return _net(prices[0].get("price_monthly", {})) if prices else 0.0
+_type_family = type_family
+_type_price = type_price
 
 
 async def _server_datacenter(server):

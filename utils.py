@@ -66,6 +66,22 @@ def traffic_limit_tb(server):
     return Config.TRAFFIC_LIMIT_TB
 
 
+def type_family(name):
+    """'cpx32' -> 'cpx'"""
+    return ''.join(c for c in (name or '') if c.isalpha()).lower()
+
+
+def type_price(stype, location):
+    """Net monthly price of a server type at a location."""
+    prices = (stype or {}).get('prices', [])
+    entry = next((p for p in prices if p.get('location') == location), None)
+    entry = entry or (prices[0] if prices else {})
+    try:
+        return float(entry.get('price_monthly', {}).get('net') or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def traffic_price_per_tb(server):
     """Net price of one TB over the included traffic, for this server.
 

@@ -2,18 +2,52 @@ import asyncio
 import logging
 from hetzner_api import hetzner_api
 from overage_tracker import overage_tracker
-from utils import overage_cost
+from utils import overage_cost, location_name, type_family, type_price
 
 logger = logging.getLogger(__name__)
 
-UPGRADE_MAP = {
-    'cx23': 'cx33',
-    'cx33': 'cx43',
-    'cx43': 'cx53',
-    'cax11': 'cax21',
-    'cax21': 'cax31',
-    'cax31': 'cax41',
-}
+
+def pick_upgrade_type(types, current, location):
+    """Cheapest plan worth bouncing through to reset the traffic counter.
+
+    NOTE: this deliberately does not look at what the datacenter reports as
+    available. The API accepts a type change the console would refuse, and
+    that is the whole reason the traffic reset works — Change Plan filters on
+    availability, this must not, or there is nothing to bounce through.
+
+    The target has to be at least as big as the current plan in every
+    dimension, disk included: the change runs with upgrade_disk=False so the
+    disk is never grown, and Hetzner refuses a type whose disk is smaller
+    than the server already has. Same family is preferred, so the plan the
+    server sits on for those two minutes stays close to what it was.
+    """
+    cores, memory, disk = (current.get(k, 0) or 0 for k in ('cores', 'memory', 'disk'))
+
+    def bigger(t):
+        return (
+            (t.get('cores', 0) or 0) >= cores
+            and (t.get('memory', 0) or 0) >= memory
+            and (t.get('disk', 0) or 0) >= disk
+            and ((t.get('cores', 0) or 0, t.get('memory', 0) or 0) != (cores, memory))
+        )
+
+    candidates = [
+        t for t in types
+        if t.get('name') != current.get('name')
+        and t.get('architecture') == current.get('architecture')
+        and not t.get('deprecation')
+        and bigger(t)
+    ]
+    if not candidates:
+        return None
+    family = type_family(current.get('name', ''))
+    same_family = [t for t in candidates if type_family(t.get('name', '')) == family]
+    return min(same_family or candidates, key=lambda t: type_price(t, location))
+
+
+async def _upgrade_target(server):
+    types = await hetzner_api.get_server_types()
+    return pick_upgrade_type(types, server.get('server_type', {}), location_name(server))
 
 async def reset_server_traffic(server_id, progress_callback=None):
     logs = []
@@ -40,12 +74,13 @@ async def reset_server_traffic(server_id, progress_callback=None):
         
         await add_log("💾", f"Current plan: {current_type}")
         
-        upgrade_type = UPGRADE_MAP.get(current_type)
-        
-        if not upgrade_type:
-            await add_log("❌", f"No upgrade plan available for {current_type}")
+        target = await _upgrade_target(server)
+
+        if not target:
+            await add_log("❌", f"No larger plan to bounce through for {current_type}")
             return False, logs
-        
+
+        upgrade_type = target["name"]
         await add_log("🔼", f"Upgrade plan selected: {upgrade_type}")
 
         # resetting the counter is what stops Hetzner billing the overage, so
@@ -144,3 +179,47 @@ async def reset_server_traffic(server_id, progress_callback=None):
         logger.error(f"Error during traffic reset: {e}")
         await add_log("❌", f"Unexpected error: {str(e)}")
         return False, logs
+
+
+def demo():
+    def t(name, cores, mem, disk, price, arch='x86', dep=None):
+        return {'name': name, 'cores': cores, 'memory': mem, 'disk': disk,
+                'architecture': arch, 'deprecation': dep,
+                'prices': [{'location': 'hel1', 'price_monthly': {'net': str(price)}}]}
+
+    TYPES = [
+        t('cx23', 2, 4, 40, 5.49),   t('cx33', 4, 8, 80, 13.10),  t('cx43', 8, 16, 160, 26.10),
+        t('cpx22', 3, 4, 80, 19.49), t('cpx32', 4, 8, 160, 35.49), t('cpx42', 8, 16, 240, 60.49),
+        t('cax11', 2, 4, 40, 3.79, arch='arm'), t('cax21', 4, 8, 80, 6.49, arch='arm'),
+        t('old99', 16, 32, 360, 1.00, dep={'announced': 'x'}),
+    ]
+    by = {x['name']: x for x in TYPES}
+    pick = lambda n: (pick_upgrade_type(TYPES, by[n], 'hel1') or {}).get('name')
+
+    # the family that could not reset at all before
+    assert pick('cpx22') == 'cpx32', pick('cpx22')
+    assert pick('cpx32') == 'cpx42'
+    # cx and cax still work, and stay inside their own family
+    assert pick('cx23') == 'cx33'
+    assert pick('cax11') == 'cax21'
+    # never a smaller plan, never a smaller disk, never a deprecated one
+    for name in ('cpx22', 'cx23', 'cax11'):
+        chosen = by[pick(name)]
+        cur = by[name]
+        assert chosen['cores'] >= cur['cores'] and chosen['memory'] >= cur['memory']
+        assert chosen['disk'] >= cur['disk'], f"{name}: disk would shrink"
+        assert not chosen['deprecation']
+        assert chosen['architecture'] == cur['architecture']
+    # the cheapest step up, not just any
+    assert pick('cx23') != 'cx43'
+    # nothing bigger => the caller is told, rather than picking something wrong
+    assert pick_upgrade_type(TYPES, by['cpx42'], 'hel1') is None
+
+    # availability is not an input at all: cx23 -> cx33 is exactly the case
+    # Hetzner lists as unavailable, and it must still be chosen
+    assert 'available' not in pick_upgrade_type.__code__.co_varnames
+    print('server_manager demo OK')
+
+
+if __name__ == '__main__':
+    demo()
