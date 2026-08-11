@@ -11,7 +11,10 @@ from telegram.ext import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import Config
-from handlers import start_handler, button_handler, _start_console
+from handlers import (
+    start_handler, button_handler, _start_console,
+    price_ask, price_recv, price_cancel, WAIT_PRICE,
+)
 from monitor import traffic_monitor
 from shell_handler import (
     recv_port, recv_user, recv_auth_type,
@@ -47,6 +50,22 @@ def check_hetzner_token():
                 logging.warning(f"Account '{acc['name']}': Hetzner API returned HTTP {e.code}")
         except Exception as e:
             logging.warning(f"Could not verify account '{acc['name']}' (network issue?): {e}")
+
+
+async def on_error(update, context):
+    """Log the failure and tell the admin, instead of dumping a raw traceback."""
+    logging.error("Handler error", exc_info=context.error)
+    query = getattr(update, "callback_query", None)
+    try:
+        if query:
+            await query.answer(f"⚠️ {type(context.error).__name__}", show_alert=True)
+        elif getattr(update, "effective_chat", None):
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"⚠️ Something went wrong: {type(context.error).__name__}",
+            )
+    except Exception:
+        pass
 
 
 def main():
@@ -96,9 +115,25 @@ def main():
         per_user=True,
     )
 
+    price_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(price_ask, pattern=r"^priceset_")],
+        states={
+            WAIT_PRICE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, price_recv),
+                CallbackQueryHandler(price_cancel, pattern="^prices$"),
+            ],
+        },
+        fallbacks=[CallbackQueryHandler(price_cancel, pattern="^prices$")],
+        per_message=False,
+        per_chat=True,
+        per_user=True,
+    )
+
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(console_conv)
+    app.add_handler(price_conv)
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_error_handler(on_error)
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(traffic_monitor, "interval", hours=1, args=[app.bot])

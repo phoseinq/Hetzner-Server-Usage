@@ -1,8 +1,8 @@
 import asyncio
 import logging
-from config import Config
 from hetzner_api import hetzner_api
 from overage_tracker import overage_tracker
+from utils import traffic_limit_tb
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ async def reset_server_traffic(server_id, progress_callback=None):
         # the reset wipes the traffic counter, so persist this cycle's
         # overage cost before touching the server
         traffic_tb = server.get('outgoing_traffic', 0) / (1024 ** 4)
-        overage = max(0, traffic_tb - Config.TRAFFIC_LIMIT_TB) * 1.0
+        overage = max(0, traffic_tb - traffic_limit_tb(server)) * 1.0
         if overage > 0:
             overage_tracker.update_live_overage(server_id, overage)
             overage_tracker.commit_overage(server_id)

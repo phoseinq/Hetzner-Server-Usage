@@ -5,6 +5,7 @@
 server_data.csv
 overage_history.json
 monitor_state.json
+price_overrides.json
 
 # python
 venv/

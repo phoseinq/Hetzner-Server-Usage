@@ -3,15 +3,38 @@ import calendar
 import logging
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ConversationHandler
 from config import Config
 from hetzner_api import hetzner_api, set_account, account_count, account_name, all_apis
-from utils import format_traffic, get_traffic_emoji, get_location_info
+from utils import (
+    format_traffic, get_traffic_emoji, get_location_info,
+    get_location, location_name, traffic_limit_tb,
+)
 from server_manager import reset_server_traffic
 from overage_tracker import overage_tracker
+from price_store import price_store
 from shell_handler import console_entry, active_sessions
 
 logger = logging.getLogger(__name__)
+
+
+async def _edit(query, text, **kwargs):
+    """edit_message_text that tolerates an unchanged message.
+
+    Telegram rejects an edit whose text and markup are identical to what is
+    already on screen, which is exactly what a Refresh button produces when
+    nothing moved.
+    """
+    try:
+        await query.edit_message_text(text, **kwargs)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
+        try:
+            await query.answer("Already up to date")
+        except Exception:
+            pass
 
 
 def _gross(price_dict):
@@ -19,6 +42,18 @@ def _gross(price_dict):
         return float(price_dict.get("gross", 0) or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _server_price(server):
+    """Monthly price of a server as billed, in EUR.
+
+    Uses the price entry for the location the server actually runs in, then
+    lets a manual override win: the API always reports today's list price,
+    while an old account keeps the price it signed up at.
+    """
+    stype = server.get("server_type", {})
+    api_price = _type_price(stype, location_name(server))
+    return price_store.apply(stype.get("name", ""), api_price)
 
 
 def _image_price_per_gb(pricing):
@@ -36,7 +71,7 @@ def _floating_ip_price(pricing, fip):
 
 
 def _primary_ip_price(pricing, pip):
-    loc = pip.get("datacenter", {}).get("location", {}).get("name")
+    loc = location_name(pip)
     for entry in pricing.get("primary_ips", []):
         if entry.get("type") == pip.get("type"):
             for p in entry.get("prices", []):
@@ -55,7 +90,10 @@ def _main_menu_keyboard():
             InlineKeyboardButton("🌐 Floating IPs", callback_data="fips"),
             InlineKeyboardButton("📍 Primary IPs", callback_data="pips"),
         ],
-        [InlineKeyboardButton("💸 Cost Report", callback_data="overage_cost")],
+        [
+            InlineKeyboardButton("💸 Cost Report", callback_data="overage_cost"),
+            InlineKeyboardButton("💰 Prices", callback_data="prices"),
+        ],
     ]
 
 
@@ -111,6 +149,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reset_password(query, context, int(data.split("_")[1]))
     elif data == "overage_cost":
         await show_overage_cost(query, context)
+    elif data == "prices":
+        await show_prices(query, context)
+    elif data == "priceclear":
+        await price_clear_all(query, context)
     elif data == "snapshots":
         await show_snapshots(query, context)
     elif data == "snap_new":
@@ -229,7 +271,7 @@ async def _start_console(update: Update, context: ContextTypes.DEFAULT_TYPE):
     server_id = int(query.data.split("_")[1])
     server = await hetzner_api.get_server(server_id)
     if not server:
-        await query.edit_message_text("⚠️ Server not found.")
+        await _edit(query, "⚠️ Server not found.")
         return ConversationHandler.END
     if server.get("status") != "running":
         await query.answer("⚠️ Server must be RUNNING to open a console.", show_alert=True)
@@ -243,7 +285,7 @@ async def show_account_picker(query, context):
     keyboard = [[InlineKeyboardButton(f"🔑 {account_name(i)}", callback_data=f"acct_{i}")]
                 for i in range(account_count())]
     keyboard.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")])
-    await query.edit_message_text(
+    await _edit(query, 
         "🔑 *Choose a Hetzner account*",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
@@ -253,7 +295,7 @@ async def show_account_picker(query, context):
 async def show_server_list(query, context, page=0):
     servers = await hetzner_api.list_servers()
     if not servers:
-        await query.edit_message_text("⚠️ No servers found or API error occurred.")
+        await _edit(query, "⚠️ No servers found or API error occurred.")
         return
 
     items_per_page = 10
@@ -263,10 +305,11 @@ async def show_server_list(query, context, page=0):
     keyboard = []
     for s in page_servers:
         tb = s.get("outgoing_traffic", 0) / (1024 ** 4)
-        emoji = get_traffic_emoji(tb)
-        loc_name, flag = get_location_info(s.get("datacenter", {}).get("location", {}).get("name", ""))
+        limit_tb = traffic_limit_tb(s)
+        emoji = get_traffic_emoji(tb, limit_tb)
+        loc_name, flag = get_location_info(get_location(s))
         keyboard.append([InlineKeyboardButton(
-            f"{emoji} {s.get('name','Unnamed')} | {flag} {loc_name} | {format_traffic(s.get('outgoing_traffic',0))}",
+            f"{emoji} {s.get('name','Unnamed')} | {flag} {loc_name} | {format_traffic(s.get('outgoing_traffic',0), limit_tb)}",
             callback_data=f"server_{s['id']}",
         )])
 
@@ -284,7 +327,7 @@ async def show_server_list(query, context, page=0):
     header = "📋 *SERVER LIST*"
     if account_count() > 1:
         header += f"\n🔑 Account: `{account_name(context.user_data.get('acct', 0))}`"
-    await query.edit_message_text(
+    await _edit(query, 
         header + "\n",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
@@ -294,29 +337,29 @@ async def show_server_list(query, context, page=0):
 async def show_server_detail(query, context, server_id, refresh=False):
     server = await hetzner_api.get_server(server_id, fresh=refresh)
     if not server:
-        await query.edit_message_text("⚠️ Server not found or API error.")
+        await _edit(query, "⚠️ Server not found or API error.")
         return
 
     name   = server.get("name", "Unnamed")
     status = server.get("status", "unknown")
     stype  = server.get("server_type", {}).get("name", "Unknown")
-    loc_name, flag = get_location_info(server.get("datacenter", {}).get("location", {}).get("name", ""))
+    loc_name, flag = get_location_info(get_location(server))
     traffic_bytes = server.get("outgoing_traffic", 0)
     traffic_tb    = traffic_bytes / (1024 ** 4)
-    traffic_pct   = (traffic_bytes / Config.TRAFFIC_LIMIT_BYTES) * 100
-    emoji         = get_traffic_emoji(traffic_tb)
-    overage_eur   = max(0, traffic_tb - Config.TRAFFIC_LIMIT_TB) * 1.0
+    limit_tb      = traffic_limit_tb(server)
+    traffic_pct   = (traffic_tb / limit_tb) * 100
+    emoji         = get_traffic_emoji(traffic_tb, limit_tb)
+    overage_tracker.update_live_overage(server_id, max(0, traffic_tb - limit_tb) * 1.0)
+    overage_eur   = overage_tracker.get_server_month_overage(server_id)
     ip     = server.get("public_net", {}).get("ipv4", {}).get("ip", "N/A")
     cores  = server.get("server_type", {}).get("cores", "N/A")
     memory = server.get("server_type", {}).get("memory", "N/A")
     disk   = server.get("server_type", {}).get("disk", "N/A")
 
-    prices = server.get("server_type", {}).get("prices", [])
-    monthly_price = "N/A"
-    if prices:
-        raw = prices[0].get("price_monthly", {}).get("gross", None)
-        if raw:
-            monthly_price = f"€{float(raw):.2f}"
+    price = _server_price(server)
+    monthly_price = f"€{price:.2f}" if price else "N/A"
+    if price_store.get(stype) is not None:
+        monthly_price += " ✏️"
 
     status_emoji = "🟢" if status == "running" else "🔴" if status == "off" else "🟡"
     backups_on = bool(server.get("backup_window"))
@@ -331,9 +374,9 @@ async def show_server_detail(query, context, server_id, refresh=False):
         f"💾 Backups: `{'ON' if backups_on else 'OFF'}`\n\n"
         f"💰 *Pricing*\n"
         f"📦 Server Cost: `{monthly_price}/month`\n"
-        f"📊 Overage Cost: `€{overage_eur:.2f}`\n\n"
+        f"📊 Overage This Month: `€{overage_eur:.2f}`\n\n"
         f"{emoji} *Traffic Usage*\n"
-        f"📊 {format_traffic(traffic_bytes)} ({traffic_pct:.1f}%)\n"
+        f"📊 {format_traffic(traffic_bytes, limit_tb)} ({traffic_pct:.1f}%)\n"
     )
 
     keyboard = [
@@ -369,28 +412,28 @@ async def show_server_detail(query, context, server_id, refresh=False):
         ],
     ]
 
-    await query.edit_message_text(
+    await _edit(query, 
         text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown",
     )
 
 
 async def power_action(query, context, server_id, action):
-    await query.edit_message_text(f"⚙️ {'Starting' if action == 'on' else 'Stopping'} server...")
+    await _edit(query, f"⚙️ {'Starting' if action == 'on' else 'Stopping'} server...")
     result = await (hetzner_api.power_on(server_id) if action == "on" else hetzner_api.power_off(server_id))
     if result:
         await hetzner_api.wait_for_status(server_id, "running" if action == "on" else "off")
         await show_server_detail(query, context, server_id, refresh=True)
     else:
-        await query.edit_message_text("❌ Power action failed. Please try again.")
+        await _edit(query, "❌ Power action failed. Please try again.")
 
 
 async def reset_traffic(query, context, server_id):
-    await query.edit_message_text("🔄 Starting traffic reset process...\n\nThis may take several minutes.")
+    await _edit(query, "🔄 Starting traffic reset process...\n\nThis may take several minutes.")
 
     async def update_progress(logs):
         log_text = "\n".join(f"{e} {m}" for e, m in logs)
         try:
-            await query.edit_message_text(f"*Traffic Reset Process*\n\n{log_text}", parse_mode="Markdown")
+            await _edit(query, f"*Traffic Reset Process*\n\n{log_text}", parse_mode="Markdown")
         except Exception:
             pass
 
@@ -403,7 +446,7 @@ async def reset_traffic(query, context, server_id):
         [InlineKeyboardButton("🔄 Refresh Status", callback_data=f"refresh_{server_id}")],
         [InlineKeyboardButton("⬅️ Back to List", callback_data="list_servers")],
     ]
-    await query.edit_message_text(final, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await _edit(query, final, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def reset_password(query, context, server_id):
@@ -415,7 +458,7 @@ async def reset_password(query, context, server_id):
             InlineKeyboardButton("❌ Cancel", callback_data=f"server_{server_id}"),
         ]
     ]
-    await query.edit_message_text(
+    await _edit(query, 
         f"🔑 *Reset Root Password*\n\n"
         f"Server: `{name}`\n\n"
         f"⚠️ This will generate a new random root password.\n"
@@ -427,12 +470,12 @@ async def reset_password(query, context, server_id):
 
 
 async def reset_password_confirm(query, context, server_id):
-    await query.edit_message_text("🔑 Resetting root password...", parse_mode="Markdown")
+    await _edit(query, "🔑 Resetting root password...", parse_mode="Markdown")
     result = await hetzner_api.reset_password(server_id)
     keyboard = [[InlineKeyboardButton("⬅️ Back to Server", callback_data=f"server_{server_id}")]]
     if result and result.get("root_password"):
         pw = result["root_password"]
-        await query.edit_message_text(
+        await _edit(query, 
             f"✅ *Password Reset Successful*\n\n"
             f"🔑 New root password:\n`{pw}`\n\n"
             f"⚠️ Save this password now — it won't be shown again.",
@@ -440,7 +483,7 @@ async def reset_password_confirm(query, context, server_id):
             parse_mode="Markdown",
         )
     else:
-        await query.edit_message_text(
+        await _edit(query, 
             "❌ *Password reset failed.*\n\n"
             "Make sure qemu-guest-agent is installed and the server is running.",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -480,13 +523,14 @@ async def show_overage_cost(query, context):
             tb    = s.get("outgoing_traffic", 0) / (1024 ** 4)
             sname = s.get("name", "Unnamed")
             stype = s.get("server_type", {}).get("name", "?")
-            prices = s.get("server_type", {}).get("prices", [])
-            sp = float(prices[0].get("price_monthly", {}).get("gross", 0)) if prices else 0
+            limit_tb = traffic_limit_tb(s)
+            sp = _server_price(s)
             total_server_cost += sp
-            ov = max(0, tb - Config.TRAFFIC_LIMIT_TB) * 1.0
+            ov = max(0, tb - limit_tb) * 1.0
             overage_tracker.update_live_overage(s["id"], ov)
             ov_month = overage_tracker.get_server_month_overage(s["id"])
-            line = f"• `{sname}` ({stype}): €{sp:.2f} | {format_traffic(s.get('outgoing_traffic', 0))}"
+            edited = " ✏️" if price_store.get(stype) is not None else ""
+            line = f"• `{sname}` ({stype}): €{sp:.2f}{edited} | {format_traffic(s.get('outgoing_traffic', 0), limit_tb)}"
             if s.get("backup_window"):
                 backup_count += 1
                 backup_cost += sp * backup_pct / 100
@@ -505,7 +549,7 @@ async def show_overage_cost(query, context):
         vol_count += len(volumes)
 
     if not any_servers:
-        await query.edit_message_text("⚠️ No servers found or API error occurred.")
+        await _edit(query, "⚠️ No servers found or API error occurred.")
         return
 
     monthly_overage = overage_tracker.get_current_month_overage()
@@ -560,14 +604,116 @@ async def show_overage_cost(query, context):
         text += "\n*Monthly History:*\n"
         for month, cost in monthly_breakdown[:6]:
             text += f"• {month}: €{cost:.2f}\n"
+    vat = pricing.get("vat_rate")
+    if vat:
+        text += f"\n_Prices include {float(vat):.0f}% VAT, the rate Hetzner reports for this account._\n"
+    if price_store.all():
+        text += "_✏️ marks a manually set price._\n"
     text += f"\n🕓 Updated: `{now.strftime('%H:%M:%S')}`"
 
     keyboard = [
         [InlineKeyboardButton("🔄 Refresh", callback_data="overage_cost")],
+        [InlineKeyboardButton("💰 Edit Prices", callback_data="prices")],
         [InlineKeyboardButton("📊 Server Management", callback_data="list_servers")],
         [InlineKeyboardButton("⬅️ Back", callback_data="start_menu")],
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
+WAIT_PRICE = 100
+
+
+async def show_prices(query, context):
+    """Per-type monthly prices, with the manual override shown next to the API one."""
+    seen = {}
+    for _idx, _name, api in all_apis():
+        for s in await api.list_servers():
+            stype = s.get("server_type", {}).get("name", "?")
+            entry = seen.setdefault(stype, {"count": 0, "api": 0.0})
+            entry["count"] += 1
+            entry["api"] = _type_price(s.get("server_type", {}), location_name(s)) or entry["api"]
+
+    text = (
+        "💰 *Server Prices*\n\n"
+        "The Hetzner API only reports today's list price. If your account is billed "
+        "on an older contract, set the real figure here and the cost report will use it.\n\n"
+    )
+    keyboard = []
+    if not seen:
+        text += "No servers found.\n"
+    for stype, info in sorted(seen.items()):
+        override = price_store.get(stype)
+        if override is None:
+            text += f"• `{stype}` ×{info['count']}: €{info['api']:.2f} (API)\n"
+            label = f"✏️ {stype} — €{info['api']:.2f}"
+        else:
+            text += f"• `{stype}` ×{info['count']}: €{override:.2f} ✏️ (API says €{info['api']:.2f})\n"
+            label = f"✏️ {stype} — €{override:.2f} (custom)"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"priceset_{stype}")])
+
+    if price_store.all():
+        keyboard.append([InlineKeyboardButton("♻️ Reset all to API prices", callback_data="priceclear")])
+    keyboard.append([InlineKeyboardButton("⬅️ Back to Cost Report", callback_data="overage_cost")])
+    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
+async def price_clear_all(query, context):
+    for stype in list(price_store.all()):
+        price_store.clear(stype)
+    await show_prices(query, context)
+
+
+async def price_ask(update, context):
+    """Entry point of the price conversation: ask for the new monthly price."""
+    query = update.callback_query
+    if query.from_user.id != Config.ADMIN_ID:
+        await query.answer("⛔ Unauthorized", show_alert=True)
+        return ConversationHandler.END
+    await query.answer()
+    stype = query.data.split("_", 1)[1]
+    context.user_data["price_type"] = stype
+    current = price_store.get(stype)
+    text = (
+        f"💰 *Price for* `{stype}`\n\n"
+        f"Send the monthly price you are actually billed, in EUR — e.g. `3.79`.\n"
+    )
+    if current is not None:
+        text += f"\nCurrently set to €{current:.2f}."
+    await _edit(
+        query, text,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Cancel", callback_data="prices")]]),
+        parse_mode="Markdown",
+    )
+    return WAIT_PRICE
+
+
+async def price_recv(update, context):
+    stype = context.user_data.get("price_type")
+    raw = (update.message.text or "").strip().replace("€", "").replace(",", ".")
+    try:
+        value = float(raw)
+        if value < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("⚠️ Send a number, e.g. `3.79`.", parse_mode="Markdown")
+        return WAIT_PRICE
+
+    price_store.set(stype, value)
+    keyboard = [[InlineKeyboardButton("💰 Prices", callback_data="prices"),
+                 InlineKeyboardButton("💸 Cost Report", callback_data="overage_cost")]]
+    await update.message.reply_text(
+        f"✅ `{stype}` is now billed at €{value:.2f}/month.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+    return ConversationHandler.END
+
+
+async def price_cancel(update, context):
+    query = update.callback_query
+    await query.answer()
+    await show_prices(query, context)
+    return ConversationHandler.END
 
 
 async def show_snapshots(query, context):
@@ -602,7 +748,7 @@ async def show_snapshots(query, context):
     text += f"\n\n🕓 Updated: `{datetime.now().strftime('%H:%M:%S')}`"
     keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data="snapshots")])
     keyboard.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def show_snapshot_detail(query, context, image_id):
@@ -611,7 +757,7 @@ async def show_snapshot_detail(query, context, image_id):
         hetzner_api.get_pricing(),
     )
     if not img:
-        await query.edit_message_text(
+        await _edit(query, 
             "⚠️ Snapshot not found.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="snapshots")]]),
         )
@@ -640,7 +786,7 @@ async def show_snapshot_detail(query, context, image_id):
         [InlineKeyboardButton("🗑 Delete Snapshot", callback_data=f"snapdel_{image_id}")],
         [InlineKeyboardButton("⬅️ Back to Snapshots", callback_data="snapshots")],
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def delete_snapshot_confirm(query, context, image_id):
@@ -654,7 +800,7 @@ async def delete_snapshot_confirm(query, context, image_id):
             InlineKeyboardButton("❌ Cancel", callback_data=f"snap_{image_id}"),
         ]
     ]
-    await query.edit_message_text(
+    await _edit(query, 
         f"🗑 *Delete Snapshot*\n\n"
         f"Snapshot: `{label}`\n{note}\n"
         f"⚠️ This cannot be undone. Are you sure?",
@@ -664,13 +810,13 @@ async def delete_snapshot_confirm(query, context, image_id):
 
 
 async def delete_snapshot(query, context, image_id):
-    await query.edit_message_text("🗑 Deleting snapshot...")
+    await _edit(query, "🗑 Deleting snapshot...")
     img = await hetzner_api.get_image(image_id)
     if img and img.get("protection", {}).get("delete"):
         # protected snapshots cannot be deleted; lift the protection first
         unlocked = await hetzner_api.change_image_protection(image_id, False)
         if unlocked is None:
-            await query.edit_message_text(
+            await _edit(query, 
                 "❌ Could not remove the delete protection. Check the logs.",
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("⬅️ Back to Snapshots", callback_data="snapshots")]]
@@ -680,12 +826,12 @@ async def delete_snapshot(query, context, image_id):
     result = await hetzner_api.delete_image(image_id)
     keyboard = [[InlineKeyboardButton("⬅️ Back to Snapshots", callback_data="snapshots")]]
     if result is not None:
-        await query.edit_message_text(
+        await _edit(query, 
             "✅ Snapshot deleted successfully.",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
     else:
-        await query.edit_message_text(
+        await _edit(query, 
             "❌ Failed to delete snapshot. Check the logs and try again.",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -698,7 +844,7 @@ async def show_server_snapshots(query, context, server_id):
         hetzner_api.get_pricing(),
     )
     if not server:
-        await query.edit_message_text("⚠️ Server not found or API error.")
+        await _edit(query, "⚠️ Server not found or API error.")
         return
     per_gb = _image_price_per_gb(pricing)
     own = [i for i in images if (i.get("created_from") or {}).get("id") == server_id]
@@ -727,23 +873,23 @@ async def show_server_snapshots(query, context, server_id):
     text += f"\n\n🕓 Updated: `{datetime.now().strftime('%H:%M:%S')}`"
     keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"srvsnap_{server_id}")])
     keyboard.append([InlineKeyboardButton("⬅️ Back to Server", callback_data=f"server_{server_id}")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def snapshot_pick_server(query, context):
     servers = await hetzner_api.list_servers()
     if not servers:
-        await query.edit_message_text("⚠️ No servers found or API error occurred.")
+        await _edit(query, "⚠️ No servers found or API error occurred.")
         return
     keyboard = []
     for s in servers:
-        loc_name, flag = get_location_info(s.get("datacenter", {}).get("location", {}).get("name", ""))
+        loc_name, flag = get_location_info(get_location(s))
         keyboard.append([InlineKeyboardButton(
             f"🖥 {s.get('name', 'Unnamed')} | {flag} {loc_name}",
             callback_data=f"snapcreate_{s['id']}",
         )])
     keyboard.append([InlineKeyboardButton("⬅️ Back to Snapshots", callback_data="snapshots")])
-    await query.edit_message_text(
+    await _edit(query, 
         "📸 *Take Snapshot*\n\nChoose a server:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
@@ -753,19 +899,19 @@ async def snapshot_pick_server(query, context):
 async def create_snapshot(query, context, server_id):
     server = await hetzner_api.get_server(server_id)
     if not server:
-        await query.edit_message_text("⚠️ Server not found or API error.")
+        await _edit(query, "⚠️ Server not found or API error.")
         return
     name = server.get("name", "Server")
     description = f"{name} {datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
-    await query.edit_message_text(f"📸 Creating snapshot of `{name}`...", parse_mode="Markdown")
+    await _edit(query, f"📸 Creating snapshot of `{name}`...", parse_mode="Markdown")
     result = await hetzner_api.create_snapshot(server_id, description)
 
     keyboard = [[InlineKeyboardButton("📸 View Server Snapshots", callback_data=f"srvsnap_{server_id}")],
                 [InlineKeyboardButton("🖥 Back to Server", callback_data=f"server_{server_id}")],
                 [InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")]]
     if result:
-        await query.edit_message_text(
+        await _edit(query, 
             f"⏳ *Snapshot creation started*\n\n"
             f"🖥 Server: `{name}`\n"
             f"🏷 Name: `{description}`\n\n"
@@ -775,7 +921,7 @@ async def create_snapshot(query, context, server_id):
             parse_mode="Markdown",
         )
     else:
-        await query.edit_message_text(
+        await _edit(query, 
             "❌ Failed to start snapshot creation. Check the logs and try again.",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -787,7 +933,7 @@ async def rebuild_pick_image(query, context, server_id):
         hetzner_api.list_images("system"),
     )
     if not server:
-        await query.edit_message_text("⚠️ Server not found or API error.")
+        await _edit(query, "⚠️ Server not found or API error.")
         return
     arch = server.get("server_type", {}).get("architecture", "x86")
     usable = [
@@ -807,7 +953,7 @@ async def rebuild_pick_image(query, context, server_id):
     if row:
         keyboard.append(row)
     keyboard.append([InlineKeyboardButton("⬅️ Back to Server", callback_data=f"server_{server_id}")])
-    await query.edit_message_text(
+    await _edit(query, 
         f"🔧 *Rebuild OS*\n\n"
         f"Server: `{server.get('name')}`\n\n"
         f"Choose the operating system image:",
@@ -825,7 +971,7 @@ async def rebuild_confirm(query, context, server_id, image):
             InlineKeyboardButton("❌ Cancel", callback_data=f"server_{server_id}"),
         ]
     ]
-    await query.edit_message_text(
+    await _edit(query, 
         f"🔧 *Rebuild OS*\n\n"
         f"Server: `{name}`\n"
         f"New image: `{image}`\n\n"
@@ -838,7 +984,7 @@ async def rebuild_confirm(query, context, server_id, image):
 
 
 async def rebuild_go(query, context, server_id, image):
-    await query.edit_message_text("🔧 Rebuilding server... this takes a minute or two.")
+    await _edit(query, "🔧 Rebuilding server... this takes a minute or two.")
     result = await hetzner_api.rebuild_server(server_id, image)
     keyboard = [[InlineKeyboardButton("🖥 Back to Server", callback_data=f"server_{server_id}")]]
     if result:
@@ -848,9 +994,9 @@ async def rebuild_go(query, context, server_id, image):
             text += f"🔑 New root password:\n`{pw}`\n\n⚠️ Save it now — it won't be shown again."
         else:
             text += "Your SSH keys were installed, no new password was generated."
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     else:
-        await query.edit_message_text(
+        await _edit(query, 
             "❌ Rebuild failed. Check the logs and try again.",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -876,12 +1022,28 @@ def _type_price(stype, location):
     return _gross(prices[0].get("price_monthly", {})) if prices else 0.0
 
 
+async def _server_datacenter(server):
+    """The datacenter a server sits in.
+
+    Server objects no longer carry a `datacenter` field, so the datacenter is
+    matched by location instead (falling back to the old field when present).
+    """
+    dc_name = (server.get("datacenter") or {}).get("name", "")
+    if dc_name:
+        return await hetzner_api.get_datacenter(dc_name)
+    loc = location_name(server)
+    if not loc:
+        return None
+    dcs = await hetzner_api.list_datacenters()
+    return next((dc for dc in dcs if dc.get("location", {}).get("name") == loc), None)
+
+
 async def _resize_candidates(server):
     """Server types actually available in this server's datacenter,
     same architecture, not deprecated, excluding the current type."""
     types, dc = await asyncio.gather(
         hetzner_api.get_server_types(),
-        hetzner_api.get_datacenter(server.get("datacenter", {}).get("name", "")),
+        _server_datacenter(server),
     )
     avail = set()
     if dc:
@@ -900,11 +1062,11 @@ async def _resize_candidates(server):
 async def resize_pick_family(query, context, server_id):
     server = await hetzner_api.get_server(server_id)
     if not server:
-        await query.edit_message_text("⚠️ Server not found or API error.")
+        await _edit(query, "⚠️ Server not found or API error.")
         return
     candidates = await _resize_candidates(server)
     if not candidates:
-        await query.edit_message_text(
+        await _edit(query, 
             "⚠️ No other plans are available for this server in its datacenter.",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅️ Back to Server", callback_data=f"server_{server_id}")]]
@@ -921,7 +1083,7 @@ async def resize_pick_family(query, context, server_id):
     ]
     keyboard.append([InlineKeyboardButton("⬅️ Back to Server", callback_data=f"server_{server_id}")])
     cur = server.get("server_type", {})
-    await query.edit_message_text(
+    await _edit(query, 
         f"⚖️ *Change Plan*\n\n"
         f"Server: `{server.get('name')}`\n"
         f"Current: `{cur.get('name')}` ({cur.get('cores')}C / {cur.get('memory'):.0f}GB / {cur.get('disk')}GB)\n\n"
@@ -934,9 +1096,9 @@ async def resize_pick_family(query, context, server_id):
 async def resize_pick_type(query, context, server_id, family):
     server = await hetzner_api.get_server(server_id)
     if not server:
-        await query.edit_message_text("⚠️ Server not found or API error.")
+        await _edit(query, "⚠️ Server not found or API error.")
         return
-    loc = server.get("datacenter", {}).get("location", {}).get("name", "")
+    loc = location_name(server)
     candidates = [t for t in await _resize_candidates(server) if _type_family(t["name"]) == family]
     candidates.sort(key=lambda t: (t.get("cores", 0), t.get("memory", 0)))
     cur = server.get("server_type", {})
@@ -948,7 +1110,7 @@ async def resize_pick_type(query, context, server_id, family):
             callback_data=f"resizet_{server_id}_{t['name']}",
         )])
     keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data=f"resize_{server_id}")])
-    await query.edit_message_text(
+    await _edit(query, 
         f"⚖️ *Change Plan* — {_FAMILY_LABEL.get(family, family.upper())}\n\n"
         f"Current: `{cur.get('name')}`\n\nChoose the new plan:",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -963,10 +1125,10 @@ async def resize_confirm(query, context, server_id, new_type_name):
     )
     new_type = next((t for t in types if t.get("name") == new_type_name), None)
     if not server or not new_type:
-        await query.edit_message_text("⚠️ Server or plan not found.")
+        await _edit(query, "⚠️ Server or plan not found.")
         return
     cur = server.get("server_type", {})
-    loc = server.get("datacenter", {}).get("location", {}).get("name", "")
+    loc = location_name(server)
     text = (
         f"⚖️ *Confirm Plan Change*\n\n"
         f"Server: `{server.get('name')}`\n\n"
@@ -987,7 +1149,7 @@ async def resize_confirm(query, context, server_id, new_type_name):
             callback_data=f"resizego_{server_id}_{new_type_name}_1",
         )])
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=f"server_{server_id}")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def resize_go(query, context, server_id, new_type_name, upgrade_disk):
@@ -996,13 +1158,13 @@ async def resize_go(query, context, server_id, new_type_name, upgrade_disk):
     async def log(line):
         steps.append(line)
         try:
-            await query.edit_message_text("⚖️ *Changing Plan*\n\n" + "\n".join(steps), parse_mode="Markdown")
+            await _edit(query, "⚖️ *Changing Plan*\n\n" + "\n".join(steps), parse_mode="Markdown")
         except Exception:
             pass
 
     server = await hetzner_api.get_server(server_id)
     if not server:
-        await query.edit_message_text("⚠️ Server not found or API error.")
+        await _edit(query, "⚠️ Server not found or API error.")
         return
     was_running = server.get("status") == "running"
 
@@ -1035,7 +1197,7 @@ async def resize_go(query, context, server_id, new_type_name, upgrade_disk):
         await log("✅ Server is RUNNING")
 
     keyboard = [[InlineKeyboardButton("🖥 Back to Server", callback_data=f"server_{server_id}")]]
-    await query.edit_message_text(
+    await _edit(query, 
         "⚖️ *Changing Plan*\n\n" + "\n".join(steps) + "\n\n🎉 *Done!*",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
@@ -1049,9 +1211,9 @@ async def show_volumes(query, context, server_id):
         hetzner_api.get_pricing(),
     )
     if not server:
-        await query.edit_message_text("⚠️ Server not found or API error.")
+        await _edit(query, "⚠️ Server not found or API error.")
         return
-    loc = server.get("datacenter", {}).get("location", {}).get("name", "")
+    loc = location_name(server)
     per_gb = _gross(pricing.get("volume", {}).get("price_per_gb_month", {}) or pricing.get("volume", {}))
     attached = [v for v in volumes if v.get("server") == server_id]
     free = [v for v in volumes if not v.get("server") and v.get("location", {}).get("name") == loc]
@@ -1087,7 +1249,7 @@ async def show_volumes(query, context, server_id):
     text += f"🕓 Updated: `{datetime.now().strftime('%H:%M:%S')}`"
     keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"volmenu_{server_id}")])
     keyboard.append([InlineKeyboardButton("⬅️ Back to Server", callback_data=f"server_{server_id}")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def volume_pick_size(query, context, server_id):
@@ -1096,7 +1258,7 @@ async def volume_pick_size(query, context, server_id):
          for size in (10, 20, 50, 100)],
         [InlineKeyboardButton("⬅️ Back", callback_data=f"volmenu_{server_id}")],
     ]
-    await query.edit_message_text(
+    await _edit(query, 
         "💽 *New Volume*\n\nChoose the size (ext4, auto-mounted):",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
@@ -1104,13 +1266,13 @@ async def volume_pick_size(query, context, server_id):
 
 
 async def volume_create(query, context, server_id, size):
-    await query.edit_message_text(f"💽 Creating {size} GB volume...")
+    await _edit(query, f"💽 Creating {size} GB volume...")
     name = f"vol-{datetime.now().strftime('%y%m%d%H%M%S')}"
     result = await hetzner_api.create_volume(name, size, server_id)
     keyboard = [[InlineKeyboardButton("💽 Back to Volumes", callback_data=f"volmenu_{server_id}")]]
     if result:
         device = result.get("volume", {}).get("linux_device", "?")
-        await query.edit_message_text(
+        await _edit(query, 
             f"✅ *Volume created & attached*\n\n"
             f"🏷 Name: `{name}`\n💾 Size: `{size} GB`\n📁 Device: `{device}`\n\n"
             f"It is formatted as ext4 and auto-mounted.",
@@ -1118,21 +1280,21 @@ async def volume_create(query, context, server_id, size):
             parse_mode="Markdown",
         )
     else:
-        await query.edit_message_text(
+        await _edit(query, 
             "❌ Volume creation failed. Check the logs and try again.",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
 
 async def volume_attach(query, context, volume_id, server_id):
-    await query.edit_message_text("🔗 Attaching volume...")
+    await _edit(query, "🔗 Attaching volume...")
     await hetzner_api.attach_volume(volume_id, server_id)
     await asyncio.sleep(3)
     await show_volumes(query, context, server_id)
 
 
 async def volume_detach(query, context, volume_id, server_id):
-    await query.edit_message_text("🔌 Detaching volume...")
+    await _edit(query, "🔌 Detaching volume...")
     await hetzner_api.detach_volume(volume_id)
     await asyncio.sleep(3)
     await show_volumes(query, context, server_id)
@@ -1145,7 +1307,7 @@ async def volume_delete_confirm(query, context, volume_id, server_id):
             InlineKeyboardButton("❌ Cancel", callback_data=f"volmenu_{server_id}"),
         ]
     ]
-    await query.edit_message_text(
+    await _edit(query, 
         "🗑 *Delete Volume*\n\n"
         "⚠️ All data on the volume will be lost. If it is attached, it will "
         "be detached first.\n\nAre you sure?",
@@ -1155,7 +1317,7 @@ async def volume_delete_confirm(query, context, volume_id, server_id):
 
 
 async def volume_delete(query, context, volume_id, server_id):
-    await query.edit_message_text("🗑 Deleting volume...")
+    await _edit(query, "🗑 Deleting volume...")
     volumes = await hetzner_api.list_volumes()
     vol = next((v for v in volumes if v.get("id") == volume_id), None)
     if vol and vol.get("server"):
@@ -1164,9 +1326,9 @@ async def volume_delete(query, context, volume_id, server_id):
     result = await hetzner_api.delete_volume(volume_id)
     keyboard = [[InlineKeyboardButton("💽 Back to Volumes", callback_data=f"volmenu_{server_id}")]]
     if result is not None:
-        await query.edit_message_text("✅ Volume deleted.", reply_markup=InlineKeyboardMarkup(keyboard))
+        await _edit(query, "✅ Volume deleted.", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await query.edit_message_text(
+        await _edit(query, 
             "❌ Failed to delete the volume. Check the logs and try again.",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -1179,7 +1341,7 @@ async def show_server_fips(query, context, server_id):
         hetzner_api.list_servers(),
     )
     if not server:
-        await query.edit_message_text("⚠️ Server not found or API error.")
+        await _edit(query, "⚠️ Server not found or API error.")
         return
     server_names = {s["id"]: s.get("name", "?") for s in servers}
 
@@ -1205,18 +1367,18 @@ async def show_server_fips(query, context, server_id):
     text += f"\n🕓 Updated: `{datetime.now().strftime('%H:%M:%S')}`"
     keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"srvfip_{server_id}")])
     keyboard.append([InlineKeyboardButton("⬅️ Back to Server", callback_data=f"server_{server_id}")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def server_fip_assign(query, context, fip_id, server_id):
-    await query.edit_message_text("🔗 Attaching floating IP...")
+    await _edit(query, "🔗 Attaching floating IP...")
     await hetzner_api.assign_floating_ip(fip_id, server_id)
     await asyncio.sleep(2)
     await show_server_fips(query, context, server_id)
 
 
 async def server_fip_unassign(query, context, fip_id, server_id):
-    await query.edit_message_text("🔌 Detaching floating IP...")
+    await _edit(query, "🔌 Detaching floating IP...")
     await hetzner_api.unassign_floating_ip(fip_id)
     await asyncio.sleep(2)
     await show_server_fips(query, context, server_id)
@@ -1225,7 +1387,7 @@ async def server_fip_unassign(query, context, fip_id, server_id):
 async def backup_toggle_confirm(query, context, server_id):
     server = await hetzner_api.get_server(server_id)
     if not server:
-        await query.edit_message_text("⚠️ Server not found or API error.")
+        await _edit(query, "⚠️ Server not found or API error.")
         return
     enabled = bool(server.get("backup_window"))
     name = server.get("name", "Server")
@@ -1246,11 +1408,11 @@ async def backup_toggle_confirm(query, context, server_id):
         )
         yes = InlineKeyboardButton("✅ Yes, enable", callback_data=f"backupgo_{server_id}_on")
     keyboard = [[yes, InlineKeyboardButton("❌ Cancel", callback_data=f"server_{server_id}")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def backup_toggle_go(query, context, server_id, mode):
-    await query.edit_message_text("💾 Updating backup settings...")
+    await _edit(query, "💾 Updating backup settings...")
     if mode == "on":
         result = await hetzner_api.enable_backup(server_id)
     else:
@@ -1259,7 +1421,7 @@ async def backup_toggle_go(query, context, server_id, mode):
         await asyncio.sleep(2)
         await show_server_detail(query, context, server_id, refresh=True)
     else:
-        await query.edit_message_text(
+        await _edit(query, 
             "❌ Failed to change backup settings. Check the logs and try again.",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("🖥 Back to Server", callback_data=f"server_{server_id}")]]
@@ -1283,7 +1445,7 @@ def _ip_assignee_id(kind, ip):
 def _ip_location_name(kind, ip):
     if kind == "fip":
         return ip.get("home_location", {}).get("name", "")
-    return ip.get("datacenter", {}).get("location", {}).get("name", "")
+    return location_name(ip)
 
 
 async def show_ip_list(query, context, kind):
@@ -1333,7 +1495,7 @@ async def show_ip_list(query, context, kind):
     text += f"\n\n🕓 Updated: `{datetime.now().strftime('%H:%M:%S')}`"
     keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"{kind}s")])
     keyboard.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def ip_toggle(query, context, kind, ip_id):
@@ -1351,7 +1513,7 @@ async def ip_new_type(query, context, kind):
         ],
         [InlineKeyboardButton("⬅️ Back", callback_data=f"{kind}s")],
     ]
-    await query.edit_message_text(
+    await _edit(query, 
         f"{emoji} *Create {label}s*\n\nChoose the IP type:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
@@ -1378,7 +1540,7 @@ async def ip_new_place(query, context, kind, ip_type):
     if row:
         keyboard.append(row)
     keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data=f"{kind}_new")])
-    await query.edit_message_text(
+    await _edit(query, 
         f"{emoji} *Create {label}s* ({ip_type})\n\nChoose the location:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
@@ -1392,7 +1554,7 @@ async def ip_new_count(query, context, kind, ip_type, place):
          for n in (1, 2, 3, 5)],
         [InlineKeyboardButton("⬅️ Back", callback_data=f"{kind}newt_{ip_type}")],
     ]
-    await query.edit_message_text(
+    await _edit(query, 
         f"{emoji} *Create {label}s* ({ip_type} @ {place})\n\nHow many?",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
@@ -1401,7 +1563,7 @@ async def ip_new_count(query, context, kind, ip_type, place):
 
 async def ip_create(query, context, kind, ip_type, place, count):
     emoji, label = _IP_LABEL[kind]
-    await query.edit_message_text(f"{emoji} Creating {count} {label.lower()}(s)...")
+    await _edit(query, f"{emoji} Creating {count} {label.lower()}(s)...")
     stamp = datetime.now().strftime('%y%m%d%H%M%S')
     lines = []
     ok = 0
@@ -1425,7 +1587,7 @@ async def ip_create(query, context, kind, ip_type, place, count):
         [InlineKeyboardButton(f"{emoji} View {label}s", callback_data=f"{kind}s")],
         [InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")],
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def ip_delete_confirm(query, context, kind):
@@ -1446,7 +1608,7 @@ async def ip_delete_confirm(query, context, kind):
             InlineKeyboardButton("❌ Cancel", callback_data=f"{kind}s"),
         ]
     ]
-    await query.edit_message_text(
+    await _edit(query, 
         f"🗑 *Delete {label}s*\n\n{lines}\n{note}\n"
         f"⚠️ This cannot be undone. Are you sure?",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1460,7 +1622,7 @@ async def ip_delete_selected(query, context, kind):
     if not sel:
         await show_ip_list(query, context, kind)
         return
-    await query.edit_message_text(f"🗑 Deleting {len(sel)} {label.lower()}(s)...")
+    await _edit(query, f"🗑 Deleting {len(sel)} {label.lower()}(s)...")
     ips = await _fetch_ips(kind)
     ip_by_id = {ip["id"]: ip for ip in ips}
     lines = []
@@ -1482,12 +1644,12 @@ async def ip_delete_selected(query, context, kind):
         [InlineKeyboardButton(f"{emoji} View {label}s", callback_data=f"{kind}s")],
         [InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")],
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def show_start_menu(query):
     keyboard = _main_menu_keyboard()
-    await query.edit_message_text(
+    await _edit(query, 
         "🚀 *Hetzner Server Manager Bot*\n\n"
         "Manage your Hetzner Cloud servers with ease.\n"
         "Monitor traffic, reset limits, and control server states.\n\n"

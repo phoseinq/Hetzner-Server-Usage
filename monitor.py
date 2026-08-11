@@ -5,7 +5,7 @@ from pathlib import Path
 from config import Config
 from hetzner_api import all_apis, account_count
 from overage_tracker import overage_tracker
-from utils import format_traffic, get_traffic_emoji
+from utils import format_traffic, get_traffic_emoji, traffic_limit_tb
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +47,14 @@ async def traffic_monitor(bot):
                 server_name = f"{server_name}  ·  {acct_name}"
             traffic_bytes = server.get('outgoing_traffic', 0)
             traffic_tb = traffic_bytes / (1024 ** 4)
-            usage_pct = (traffic_bytes / Config.TRAFFIC_LIMIT_BYTES) * 100
-            emoji = get_traffic_emoji(traffic_tb)
+            limit_tb = traffic_limit_tb(server)
+            usage_pct = (traffic_tb / limit_tb) * 100
+            emoji = get_traffic_emoji(traffic_tb, limit_tb)
 
             # keep the cost history current even if the cost report is
             # never opened; also detects resets done outside the bot
             overage_tracker.update_live_overage(
-                server_id, max(0, traffic_tb - Config.TRAFFIC_LIMIT_TB) * 1.0
+                server_id, max(0, traffic_tb - limit_tb) * 1.0
             )
 
             if server_id not in state:
@@ -70,7 +71,7 @@ async def traffic_monitor(bot):
                     msg = (
                         f"🔥 *TRAFFIC LIMIT EXCEEDED*\n\n"
                         f"Server: `{server_name}`\n"
-                        f"{emoji} Traffic: {format_traffic(traffic_bytes)} ({usage_pct:.1f}%)\n\n"
+                        f"{emoji} Traffic: {format_traffic(traffic_bytes, limit_tb)} ({usage_pct:.1f}%)\n\n"
                         f"You are being charged for overage!\n"
                         f"Reset traffic immediately to stop charges."
                     )
@@ -82,7 +83,7 @@ async def traffic_monitor(bot):
                     msg = (
                         f"🚨 *CRITICAL TRAFFIC ALERT*\n\n"
                         f"Server: `{server_name}`\n"
-                        f"{emoji} Traffic: {format_traffic(traffic_bytes)} ({usage_pct:.1f}%)\n\n"
+                        f"{emoji} Traffic: {format_traffic(traffic_bytes, limit_tb)} ({usage_pct:.1f}%)\n\n"
                         f"⚠️ Traffic limit almost exhausted!\n"
                         f"Consider resetting traffic to avoid overage charges."
                     )
@@ -94,7 +95,7 @@ async def traffic_monitor(bot):
                     msg = (
                         f"⚠️ *TRAFFIC WARNING*\n\n"
                         f"Server: `{server_name}`\n"
-                        f"{emoji} Traffic: {format_traffic(traffic_bytes)} ({usage_pct:.1f}%)\n\n"
+                        f"{emoji} Traffic: {format_traffic(traffic_bytes, limit_tb)} ({usage_pct:.1f}%)\n\n"
                         f"Traffic usage has exceeded 75% of the monthly limit."
                     )
                     await _send(bot, msg)
