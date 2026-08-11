@@ -13,7 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import Config
 from handlers import (
     start_handler, button_handler, _start_console,
-    price_ask, price_recv, price_cancel, WAIT_PRICE,
+    price_ask, price_recv, price_cancel, price_clear, WAIT_PRICE,
 )
 from monitor import traffic_monitor
 from shell_handler import (
@@ -116,14 +116,18 @@ def main():
     )
 
     price_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(price_ask, pattern=r"^priceset_")],
+        entry_points=[CallbackQueryHandler(price_ask, pattern=r"^priceset_\d+$")],
         states={
             WAIT_PRICE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, price_recv),
-                CallbackQueryHandler(price_cancel, pattern="^prices$"),
+                CallbackQueryHandler(price_clear, pattern=r"^priceclear_\d+$"),
+                CallbackQueryHandler(price_cancel, pattern=r"^pricecancel_\d+$"),
             ],
         },
-        fallbacks=[CallbackQueryHandler(price_cancel, pattern="^prices$")],
+        fallbacks=[
+            CallbackQueryHandler(price_clear, pattern=r"^priceclear_\d+$"),
+            CallbackQueryHandler(price_cancel, pattern=r"^pricecancel_\d+$"),
+        ],
         per_message=False,
         per_chat=True,
         per_user=True,

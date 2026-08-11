@@ -44,16 +44,18 @@ def _gross(price_dict):
         return 0.0
 
 
+def _api_price(server):
+    """List price for the location this server actually runs in."""
+    return _type_price(server.get("server_type", {}), location_name(server))
+
+
 def _server_price(server):
     """Monthly price of a server as billed, in EUR.
 
-    Uses the price entry for the location the server actually runs in, then
-    lets a manual override win: the API always reports today's list price,
-    while an old account keeps the price it signed up at.
+    A manual override wins over the API: the API always reports today's list
+    price, while an old server keeps the price it was ordered at.
     """
-    stype = server.get("server_type", {})
-    api_price = _type_price(stype, location_name(server))
-    return price_store.apply(stype.get("name", ""), api_price)
+    return price_store.apply(server.get("id"), _api_price(server))
 
 
 def _image_price_per_gb(pricing):
@@ -90,10 +92,7 @@ def _main_menu_keyboard():
             InlineKeyboardButton("🌐 Floating IPs", callback_data="fips"),
             InlineKeyboardButton("📍 Primary IPs", callback_data="pips"),
         ],
-        [
-            InlineKeyboardButton("💸 Cost Report", callback_data="overage_cost"),
-            InlineKeyboardButton("💰 Prices", callback_data="prices"),
-        ],
+        [InlineKeyboardButton("💸 Cost Report", callback_data="overage_cost")],
     ]
 
 
@@ -149,10 +148,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reset_password(query, context, int(data.split("_")[1]))
     elif data == "overage_cost":
         await show_overage_cost(query, context)
-    elif data == "prices":
-        await show_prices(query, context)
-    elif data == "priceclear":
-        await price_clear_all(query, context)
+    # same buttons as the price conversation, for a message left over from
+    # before a restart — the conversation state is gone but the panel is not
+    elif data.startswith("priceclear_"):
+        sid = int(data.split("_")[1])
+        price_store.clear(sid)
+        await show_server_detail(query, context, sid)
+    elif data.startswith("pricecancel_"):
+        await show_server_detail(query, context, int(data.split("_")[1]))
     elif data == "snapshots":
         await show_snapshots(query, context)
     elif data == "snap_new":
@@ -357,8 +360,9 @@ async def show_server_detail(query, context, server_id, refresh=False):
     disk   = server.get("server_type", {}).get("disk", "N/A")
 
     price = _server_price(server)
-    monthly_price = f"€{price:.2f}" if price else "N/A"
-    if price_store.get(stype) is not None:
+    custom_price = price_store.get(server_id) is not None
+    monthly_price = f"`€{price:.2f}/month`" if price else "`N/A`"
+    if custom_price:
         monthly_price += " ✏️"
 
     status_emoji = "🟢" if status == "running" else "🔴" if status == "off" else "🟡"
@@ -373,7 +377,7 @@ async def show_server_detail(query, context, server_id, refresh=False):
         f"{status_emoji} Status: `{status.upper()}`\n"
         f"💾 Backups: `{'ON' if backups_on else 'OFF'}`\n\n"
         f"💰 *Pricing*\n"
-        f"📦 Server Cost: `{monthly_price}/month`\n"
+        f"📦 Server Cost: {monthly_price}\n"
         f"📊 Overage This Month: `€{overage_eur:.2f}`\n\n"
         f"{emoji} *Traffic Usage*\n"
         f"📊 {format_traffic(traffic_bytes, limit_tb)} ({traffic_pct:.1f}%)\n"
@@ -405,6 +409,12 @@ async def show_server_detail(query, context, server_id, refresh=False):
         [
             InlineKeyboardButton("💻 SSH Console", callback_data=f"console_{server_id}"),
             InlineKeyboardButton("🔑 Reset Password", callback_data=f"resetpw_{server_id}"),
+        ],
+        [
+            InlineKeyboardButton(
+                "💰 Edit Price ✏️" if custom_price else "💰 Edit Price",
+                callback_data=f"priceset_{server_id}",
+            ),
         ],
         [
             InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh_{server_id}"),
@@ -529,7 +539,7 @@ async def show_overage_cost(query, context):
             ov = max(0, tb - limit_tb) * 1.0
             overage_tracker.update_live_overage(s["id"], ov)
             ov_month = overage_tracker.get_server_month_overage(s["id"])
-            edited = " ✏️" if price_store.get(stype) is not None else ""
+            edited = " ✏️" if price_store.get(s["id"]) is not None else ""
             line = f"• `{sname}` ({stype}): €{sp:.2f}{edited} | {format_traffic(s.get('outgoing_traffic', 0), limit_tb)}"
             if s.get("backup_window"):
                 backup_count += 1
@@ -608,12 +618,11 @@ async def show_overage_cost(query, context):
     if vat:
         text += f"\n_Prices include {float(vat):.0f}% VAT, the rate Hetzner reports for this account._\n"
     if price_store.all():
-        text += "_✏️ marks a manually set price._\n"
+        text += "_✏️ marks a price set by hand in the server's own panel._\n"
     text += f"\n🕓 Updated: `{now.strftime('%H:%M:%S')}`"
 
     keyboard = [
         [InlineKeyboardButton("🔄 Refresh", callback_data="overage_cost")],
-        [InlineKeyboardButton("💰 Edit Prices", callback_data="prices")],
         [InlineKeyboardButton("📊 Server Management", callback_data="list_servers")],
         [InlineKeyboardButton("⬅️ Back", callback_data="start_menu")],
     ]
@@ -623,72 +632,47 @@ async def show_overage_cost(query, context):
 WAIT_PRICE = 100
 
 
-async def show_prices(query, context):
-    """Per-type monthly prices, with the manual override shown next to the API one."""
-    seen = {}
-    for _idx, _name, api in all_apis():
-        for s in await api.list_servers():
-            stype = s.get("server_type", {}).get("name", "?")
-            entry = seen.setdefault(stype, {"count": 0, "api": 0.0})
-            entry["count"] += 1
-            entry["api"] = _type_price(s.get("server_type", {}), location_name(s)) or entry["api"]
-
-    text = (
-        "💰 *Server Prices*\n\n"
-        "The Hetzner API only reports today's list price. If your account is billed "
-        "on an older contract, set the real figure here and the cost report will use it.\n\n"
-    )
-    keyboard = []
-    if not seen:
-        text += "No servers found.\n"
-    for stype, info in sorted(seen.items()):
-        override = price_store.get(stype)
-        if override is None:
-            text += f"• `{stype}` ×{info['count']}: €{info['api']:.2f} (API)\n"
-            label = f"✏️ {stype} — €{info['api']:.2f}"
-        else:
-            text += f"• `{stype}` ×{info['count']}: €{override:.2f} ✏️ (API says €{info['api']:.2f})\n"
-            label = f"✏️ {stype} — €{override:.2f} (custom)"
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"priceset_{stype}")])
-
-    if price_store.all():
-        keyboard.append([InlineKeyboardButton("♻️ Reset all to API prices", callback_data="priceclear")])
-    keyboard.append([InlineKeyboardButton("⬅️ Back to Cost Report", callback_data="overage_cost")])
-    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
-
-async def price_clear_all(query, context):
-    for stype in list(price_store.all()):
-        price_store.clear(stype)
-    await show_prices(query, context)
-
-
 async def price_ask(update, context):
-    """Entry point of the price conversation: ask for the new monthly price."""
+    """Entry point of the price conversation: ask this server's real price."""
     query = update.callback_query
     if query.from_user.id != Config.ADMIN_ID:
         await query.answer("⛔ Unauthorized", show_alert=True)
         return ConversationHandler.END
     await query.answer()
-    stype = query.data.split("_", 1)[1]
-    context.user_data["price_type"] = stype
-    current = price_store.get(stype)
+    set_account(context.user_data.get("acct", 0))
+    server_id = int(query.data.split("_")[1])
+    context.user_data["price_server"] = server_id
+
+    server = await hetzner_api.get_server(server_id)
+    if not server:
+        await _edit(query, "⚠️ Server not found or API error.")
+        return ConversationHandler.END
+
+    stype = server.get("server_type", {}).get("name", "?")
+    api_price = _api_price(server)
+    current = price_store.get(server_id)
     text = (
-        f"💰 *Price for* `{stype}`\n\n"
-        f"Send the monthly price you are actually billed, in EUR — e.g. `3.79`.\n"
+        f"💰 *Price* — `{server.get('name')}`\n\n"
+        f"Type: `{stype}` | Hetzner list price: `€{api_price:.2f}/month`\n"
     )
     if current is not None:
-        text += f"\nCurrently set to €{current:.2f}."
-    await _edit(
-        query, text,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Cancel", callback_data="prices")]]),
-        parse_mode="Markdown",
+        text += f"Currently set to: `€{current:.2f}/month` ✏️\n"
+    text += (
+        "\nSend the monthly price you are actually billed for *this server*, "
+        "in EUR — e.g. `3.79`."
     )
+
+    keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data=f"pricecancel_{server_id}")]]
+    if current is not None:
+        keyboard.insert(0, [InlineKeyboardButton(
+            f"♻️ Use list price (€{api_price:.2f})", callback_data=f"priceclear_{server_id}"
+        )])
+    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     return WAIT_PRICE
 
 
 async def price_recv(update, context):
-    stype = context.user_data.get("price_type")
+    server_id = context.user_data.get("price_server")
     raw = (update.message.text or "").strip().replace("€", "").replace(",", ".")
     try:
         value = float(raw)
@@ -698,21 +682,32 @@ async def price_recv(update, context):
         await update.message.reply_text("⚠️ Send a number, e.g. `3.79`.", parse_mode="Markdown")
         return WAIT_PRICE
 
-    price_store.set(stype, value)
-    keyboard = [[InlineKeyboardButton("💰 Prices", callback_data="prices"),
+    price_store.set(server_id, value)
+    keyboard = [[InlineKeyboardButton("⬅️ Back to Server", callback_data=f"server_{server_id}"),
                  InlineKeyboardButton("💸 Cost Report", callback_data="overage_cost")]]
     await update.message.reply_text(
-        f"✅ `{stype}` is now billed at €{value:.2f}/month.",
+        f"✅ Price set to €{value:.2f}/month for this server.",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
     return ConversationHandler.END
 
 
+async def price_clear(update, context):
+    query = update.callback_query
+    await query.answer()
+    set_account(context.user_data.get("acct", 0))
+    server_id = int(query.data.split("_")[1])
+    price_store.clear(server_id)
+    await show_server_detail(query, context, server_id)
+    return ConversationHandler.END
+
+
 async def price_cancel(update, context):
     query = update.callback_query
     await query.answer()
-    await show_prices(query, context)
+    set_account(context.user_data.get("acct", 0))
+    await show_server_detail(query, context, int(query.data.split("_")[1]))
     return ConversationHandler.END
 
 
