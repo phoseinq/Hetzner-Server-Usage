@@ -658,8 +658,8 @@ async def show_overage_cost(query, context):
     text += f"🔴 *Total Overage Paid (All Time)*\n€{total_historic:.2f}\n"
     if total_avoided:
         text += f"♻️ *Total Saved by Resets*\n€{total_avoided:.2f}\n"
-    if monthly_breakdown and len(monthly_breakdown) > 1:
-        text += "\n*Monthly History:*\n"
+    if monthly_breakdown:
+        text += "\n*Billed in Previous Months:*\n"
         for month, cost in monthly_breakdown[:6]:
             text += f"• {month}: €{cost:.2f}\n"
     if vat_amount and multi:
