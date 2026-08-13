@@ -1603,18 +1603,17 @@ async def ip_new_type(query, context, kind):
 
 async def ip_new_place(query, context, kind, ip_type):
     emoji, label = _IP_LABEL[kind]
-    if kind == "fip":
-        places = [loc.get("name", "") for loc in await hetzner_api.list_locations()]
-    else:
-        # primary IPs are created in a specific datacenter
-        places = [dc.get("name", "") for dc in await hetzner_api.list_datacenters()]
+    # both kinds are created against a location; primary IPs used to take a
+    # datacenter, and passing one now fails the request outright
+    locations = await hetzner_api.list_locations()
     keyboard = []
     row = []
-    for place in places:
+    for loc in locations:
+        place = loc.get("name", "")
         if not place:
             continue
-        _, flag = get_location_info(place.split("-")[0])
-        row.append(InlineKeyboardButton(f"{flag} {place}", callback_data=f"{kind}newl_{ip_type}_{place}"))
+        label_name, flag = get_location_info(loc)
+        row.append(InlineKeyboardButton(f"{flag} {label_name}", callback_data=f"{kind}newl_{ip_type}_{place}"))
         if len(row) == 2:
             keyboard.append(row)
             row = []

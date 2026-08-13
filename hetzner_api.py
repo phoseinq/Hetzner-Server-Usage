@@ -171,10 +171,13 @@ class HetznerAPI:
         result = await self._request('GET', '/primary_ips?per_page=50')
         return result.get('primary_ips', []) if result else []
 
-    async def create_primary_ip(self, ip_type, datacenter, name):
+    async def create_primary_ip(self, ip_type, location, name):
+        # takes a location ("nbg1"), not a datacenter ("nbg1-dc3") — sending a
+        # datacenter is rejected with "either assignee_id or location must be
+        # provided"
         return await self._request('POST', '/primary_ips', {
             'type': ip_type,
-            'datacenter': datacenter,
+            'location': location,
             'name': name,
             'assignee_type': 'server',
             'auto_delete': False,
