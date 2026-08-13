@@ -176,6 +176,130 @@ async def reset_server_traffic(server_id, progress_callback=None):
         return False, logs
 
 
+async def swap_primary_ip(server_id, new_ip_id, api=None, progress_callback=None):
+    """Put a different primary IP on a server.
+
+    Hetzner refuses both halves of this while the server runs, so it is powered
+    off and — only if it was running to begin with — started again afterwards.
+    The IP that comes off is left unassigned rather than deleted.
+
+    If attaching the new IP fails, the old one goes back on and the server is
+    started again, so it never ends up running without the IP it had.
+    """
+    api = api or hetzner_api
+    logs = []
+
+    async def add_log(emoji, message):
+        logs.append((emoji, message))
+        if progress_callback:
+            await progress_callback(logs)
+
+    try:
+        server = await api.get_server(server_id, fresh=True)
+        if not server:
+            await add_log("❌", "Failed to fetch server information")
+            return False, logs
+
+        name = server.get('name', 'Server')
+        was_running = server.get('status') == 'running'
+        old = (server.get('public_net') or {}).get('ipv4') or {}
+        old_id, old_ip = old.get('id'), old.get('ip')
+
+        if was_running:
+            await add_log("🔴", f"Shutting down {name}...")
+            await api.power_off(server_id)
+            if not await api.wait_for_status(server_id, "off", max_attempts=40):
+                await add_log("❌", "Server failed to shut down — nothing was changed")
+                return False, logs
+            await add_log("✅", "Server is now OFF")
+        else:
+            await add_log("💤", "Server is already off")
+
+        if old_id:
+            await add_log("✂️", f"Removing {old_ip}...")
+            if await api.unassign_primary_ip(old_id) is None:
+                await add_log("❌", f"Could not remove {old_ip}")
+                if was_running:
+                    await api.power_on(server_id)
+                return False, logs
+            await add_log("✅", f"{old_ip} is now free")
+
+        await add_log("📎", "Attaching the new IP...")
+        if await api.assign_primary_ip(new_ip_id, server_id) is None:
+            await add_log("❌", "Could not attach the new IP — putting the old one back")
+            if old_id:
+                # the new IP never went on, so only the old one needs restoring
+                if await api.assign_primary_ip(old_id, server_id) is not None:
+                    await add_log("↩️", f"{old_ip} is back on the server")
+                else:
+                    await add_log("⚠️", f"{old_ip} could NOT be put back — the server has no IPv4")
+            if was_running:
+                await api.power_on(server_id)
+                await add_log("🟢", "Server started again")
+            return False, logs
+
+        if was_running:
+            await add_log("🟢", "Starting server...")
+            await api.power_on(server_id)
+            if not await api.wait_for_status(server_id, "running", max_attempts=40):
+                await add_log("⚠️", "Server started but the status check timed out")
+            else:
+                await add_log("✅", "Server is now RUNNING")
+
+        await add_log("🎉", "IP swap completed!")
+        return True, logs
+
+    except Exception as e:
+        logger.error(f"Error during IP swap: {e}")
+        await add_log("❌", f"Unexpected error: {str(e)}")
+        return False, logs
+
+
+async def detach_primary_ip(server_id, pip_id, api=None, progress_callback=None):
+    """Take a primary IP off a server, leaving it without a public IPv4."""
+    api = api or hetzner_api
+    logs = []
+
+    async def add_log(emoji, message):
+        logs.append((emoji, message))
+        if progress_callback:
+            await progress_callback(logs)
+
+    try:
+        server = await api.get_server(server_id, fresh=True)
+        if not server:
+            await add_log("❌", "Failed to fetch server information")
+            return False, logs
+        was_running = server.get('status') == 'running'
+
+        if was_running:
+            await add_log("🔴", f"Shutting down {server.get('name', 'Server')}...")
+            await api.power_off(server_id)
+            if not await api.wait_for_status(server_id, "off", max_attempts=40):
+                await add_log("❌", "Server failed to shut down — nothing was changed")
+                return False, logs
+            await add_log("✅", "Server is now OFF")
+
+        await add_log("✂️", "Removing the IP...")
+        if await api.unassign_primary_ip(pip_id) is None:
+            await add_log("❌", "Could not remove the IP")
+            if was_running:
+                await api.power_on(server_id)
+            return False, logs
+
+        if was_running:
+            await add_log("🟢", "Starting server...")
+            await api.power_on(server_id)
+            await api.wait_for_status(server_id, "running", max_attempts=40)
+        await add_log("🎉", "The IP is now free. The server has no public IPv4.")
+        return True, logs
+
+    except Exception as e:
+        logger.error(f"Error during IP detach: {e}")
+        await add_log("❌", f"Unexpected error: {str(e)}")
+        return False, logs
+
+
 def demo():
     def t(name, cores, mem, disk, price, arch='x86', dep=None):
         return {'name': name, 'cores': cores, 'memory': mem, 'disk': disk,
@@ -212,7 +336,87 @@ def demo():
 
     # the choice depends on the type list alone, nothing per-datacenter
     assert 'available' not in pick_upgrade_type.__code__.co_varnames
+
+    _swap_demo()
     print('server_manager demo OK')
+
+
+class _StubAPI:
+    """Enough of the API to exercise the swap without touching a real server."""
+
+    def __init__(self, status='running', old_ip_id=55, fail=None):
+        self.status = status
+        self.old_ip_id = old_ip_id
+        self.fail = fail or set()      # method names that should return None
+        self.calls = []
+        self.assigned = old_ip_id
+
+    async def get_server(self, sid, fresh=False):
+        return {'id': sid, 'name': 'srv', 'status': self.status,
+                'public_net': {'ipv4': {'id': self.old_ip_id, 'ip': '1.2.3.4'}}
+                if self.old_ip_id else {'ipv4': None}}
+
+    async def power_off(self, sid):
+        self.calls.append('power_off'); self.status = 'off'; return {}
+
+    async def power_on(self, sid):
+        self.calls.append('power_on'); self.status = 'running'; return {}
+
+    async def wait_for_status(self, sid, status, max_attempts=40):
+        return 'wait_fail' not in self.fail
+
+    async def unassign_primary_ip(self, pid):
+        self.calls.append(f'unassign:{pid}')
+        if 'unassign' in self.fail:
+            return None
+        self.assigned = None
+        return {}
+
+    async def assign_primary_ip(self, pid, sid):
+        self.calls.append(f'assign:{pid}')
+        if 'assign' in self.fail and pid != self.old_ip_id:
+            return None
+        self.assigned = pid
+        return {}
+
+
+def _swap_demo():
+    import asyncio
+
+    # happy path: off, old IP removed, new one attached, started again
+    api = _StubAPI()
+    ok, _ = asyncio.run(swap_primary_ip(1, 99, api=api))
+    assert ok and api.calls == ['power_off', 'unassign:55', 'assign:99', 'power_on'], api.calls
+    assert api.assigned == 99 and api.status == 'running'
+
+    # a server that was already off must not be started
+    api = _StubAPI(status='off')
+    ok, _ = asyncio.run(swap_primary_ip(1, 99, api=api))
+    assert ok and 'power_on' not in api.calls and api.status == 'off', api.calls
+
+    # a failed attach puts the old IP back and starts the server again
+    api = _StubAPI(fail={'assign'})
+    ok, logs = asyncio.run(swap_primary_ip(1, 99, api=api))
+    assert not ok
+    assert api.calls == ['power_off', 'unassign:55', 'assign:99', 'assign:55', 'power_on'], api.calls
+    assert api.assigned == 55, "the server was left without its original IP"
+    assert any('back on the server' in m for _, m in logs)
+
+    # if it will not power off, nothing is touched at all
+    api = _StubAPI(fail={'wait_fail'})
+    ok, _ = asyncio.run(swap_primary_ip(1, 99, api=api))
+    assert not ok and api.calls == ['power_off'], api.calls
+
+    # a server with no IPv4 yet: nothing to remove, just attach
+    api = _StubAPI(old_ip_id=None)
+    ok, _ = asyncio.run(swap_primary_ip(1, 99, api=api))
+    assert ok and api.calls == ['power_off', 'assign:99', 'power_on'], api.calls
+
+    # detach leaves the server on, without an IP
+    api = _StubAPI()
+    ok, _ = asyncio.run(detach_primary_ip(1, 55, api=api))
+    assert ok and api.calls == ['power_off', 'unassign:55', 'power_on'], api.calls
+    assert api.assigned is None
 
 
 if __name__ == '__main__':

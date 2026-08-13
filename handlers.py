@@ -12,7 +12,7 @@ from utils import (
     get_location, location_name, traffic_limit_tb,
     traffic_price_per_tb, overage_cost, type_family, type_price,
 )
-from server_manager import reset_server_traffic
+from server_manager import reset_server_traffic, swap_primary_ip, detach_primary_ip
 from overage_tracker import overage_tracker
 from price_store import price_store
 from shell_handler import console_entry, active_sessions
@@ -212,6 +212,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("pipnewc_"):
         _, ip_type, place, count = data.split("_")
         await ip_create(query, context, "pip", ip_type, place, int(count))
+    elif data.startswith("pipatgo_"):
+        _, pid, sid = data.split("_")
+        await pip_attach_go(query, context, int(pid), int(sid))
+    elif data.startswith("pipatts_"):
+        _, pid, sid = data.split("_")
+        await pip_attach_confirm(query, context, int(pid), int(sid))
+    elif data.startswith("pipatt_"):
+        await pip_attach_pick(query, context, int(data.split("_")[1]))
+    elif data.startswith("pipdetgo_"):
+        await pip_detach_go(query, context, int(data.split("_")[1]))
+    elif data.startswith("pipdet_"):
+        await pip_detach_confirm(query, context, int(data.split("_")[1]))
     elif data.startswith("piptog_"):
         await ip_toggle(query, context, "pip", int(data.split("_")[1]))
     elif data == "pipdelsel_yes":
@@ -1561,10 +1573,16 @@ async def show_ip_list(query, context, kind):
             attach = f"🔗 {server_names.get(aid, aid)}" if aid else "🆓 unassigned"
             cost_str = "free (on server)" if (kind == "pip" and aid) else f"€{price:.2f}/mo"
             text += f"• `{ip.get('ip')}` {flag} {ip.get('type')} | {attach} | {cost_str}\n"
-            keyboard.append([InlineKeyboardButton(
+            row = [InlineKeyboardButton(
                 f"{'✅' if ip['id'] in sel else '⬜'} {ip.get('ip')}",
                 callback_data=f"{kind}tog_{ip['id']}",
-            )])
+            )]
+            if kind == "pip":
+                row.append(InlineKeyboardButton(
+                    "✂️ Detach" if aid else "📎 Attach",
+                    callback_data=f"pipdet_{ip['id']}" if aid else f"pipatt_{ip['id']}",
+                ))
+            keyboard.append(row)
         text += f"\nTotal: {len(ips)} | €{total_cost:.2f}/month\n"
         text += "\nTap IPs to select them, then delete together."
 
@@ -1646,6 +1664,7 @@ async def ip_create(query, context, kind, ip_type, place, count):
     await _edit(query, f"{emoji} Creating {count} {label.lower()}(s)...")
     stamp = datetime.now().strftime('%y%m%d%H%M%S')
     lines = []
+    fresh = []
     ok = 0
     for i in range(count):
         name = f"{kind}-{stamp}-{i + 1}"
@@ -1658,16 +1677,161 @@ async def ip_create(query, context, kind, ip_type, place, count):
         if result:
             ok += 1
             lines.append(f"✅ `{created.get('ip', name)}`")
+            if created.get("id"):
+                fresh.append(created)
         else:
             lines.append(f"❌ {name} — creation failed")
     text = (
         f"{emoji} *Create {label}s — done ({ok}/{count})*\n\n" + "\n".join(lines)
     )
-    keyboard = [
+    keyboard = []
+    # putting a new IP on a server is the usual next step, so offer it here
+    # instead of making the user walk back to the list
+    if kind == "pip":
+        keyboard += [
+            [InlineKeyboardButton(f"📎 Attach {ip.get('ip')} to a server",
+                                  callback_data=f"pipatt_{ip['id']}")]
+            for ip in fresh
+        ]
+    keyboard += [
         [InlineKeyboardButton(f"{emoji} View {label}s", callback_data=f"{kind}s")],
         [InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")],
     ]
     await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
+async def _pip_and_servers(pip_id):
+    """The IP, plus the servers that can actually take it."""
+    pips, servers = await asyncio.gather(
+        hetzner_api.list_primary_ips(), hetzner_api.list_servers()
+    )
+    pip = next((p for p in pips if p["id"] == pip_id), None)
+    if not pip:
+        return None, [], {}
+    loc, ip_type = location_name(pip), pip.get("type")
+    # server_not_stopped masks every other complaint, so a mismatch would only
+    # surface once the server is already off — filter for it here instead
+    field = "ipv4" if ip_type == "ipv4" else "ipv6"
+    fits = [s for s in servers if location_name(s) == loc]
+    current = {
+        s["id"]: ((s.get("public_net") or {}).get(field) or {}).get("ip")
+        for s in fits
+    }
+    return pip, fits, current
+
+
+async def pip_attach_pick(query, context, pip_id):
+    pip, servers, current = await _pip_and_servers(pip_id)
+    if not pip:
+        await _edit(query, "⚠️ IP not found.")
+        return
+    loc_name, flag = get_location_info(get_location(pip))
+    keyboard = [
+        [InlineKeyboardButton(
+            f"🖥 {s.get('name')} — {current.get(s['id']) or 'no IP'}",
+            callback_data=f"pipatts_{pip_id}_{s['id']}",
+        )]
+        for s in servers
+    ]
+    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="pips")])
+    body = "Choose the server to put it on:" if servers else (
+        f"No server in {loc_name} can take this IP — an IP only attaches to a "
+        f"server in its own location."
+    )
+    await _edit(query,
+        f"📎 *Attach* `{pip.get('ip')}`\n\n"
+        f"{flag} {loc_name} | `{pip.get('type')}`\n\n{body}",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def pip_attach_confirm(query, context, pip_id, server_id):
+    pip, _servers, current = await _pip_and_servers(pip_id)
+    server = await hetzner_api.get_server(server_id)
+    if not pip or not server:
+        await _edit(query, "⚠️ IP or server not found.")
+        return
+    old_ip = current.get(server_id)
+    text = (
+        f"⚠️ *Confirm IP swap*\n\n"
+        f"Server: `{server.get('name')}`\n"
+    )
+    if old_ip:
+        text += (
+            f"Remove: `{old_ip}` → stays free in your Primary IPs (≈€0.50/mo)\n"
+        )
+    text += (
+        f"Attach: `{pip.get('ip')}`\n\n"
+        f"The server must be powered off for this. It will be shut down, "
+        f"swapped, then started again.\nDowntime: about a minute.\n"
+    )
+    keyboard = [[
+        InlineKeyboardButton("✅ Do it", callback_data=f"pipatgo_{pip_id}_{server_id}"),
+        InlineKeyboardButton("⬅️ Cancel", callback_data="pips"),
+    ]]
+    await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
+async def pip_detach_confirm(query, context, pip_id):
+    pips = await hetzner_api.list_primary_ips()
+    pip = next((p for p in pips if p["id"] == pip_id), None)
+    if not pip:
+        await _edit(query, "⚠️ IP not found.")
+        return
+    server = await hetzner_api.get_server(pip.get("assignee_id"))
+    keyboard = [[
+        InlineKeyboardButton("✅ Detach", callback_data=f"pipdetgo_{pip_id}"),
+        InlineKeyboardButton("⬅️ Cancel", callback_data="pips"),
+    ]]
+    await _edit(query,
+        f"⚠️ *Detach* `{pip.get('ip')}` from `{(server or {}).get('name', '?')}`?\n\n"
+        f"The server will be powered off and left with *no public IPv4*. "
+        f"You will not be able to reach it until you attach an IP again.\n\n"
+        f"The IP stays in your Primary IPs (≈€0.50/mo).",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def _run_ip_job(query, context, coro_factory, done_title):
+    """Stream a swap/detach into the message as it runs."""
+    async def progress(logs):
+        body = "\n".join(f"{e} {m}" for e, m in logs)
+        await _edit(query, f"⏳ *Working...*\n\n{body}", parse_mode="Markdown")
+
+    ok, logs = await coro_factory(progress)
+    body = "\n".join(f"{e} {m}" for e, m in logs)
+    keyboard = [
+        [InlineKeyboardButton("📍 Primary IPs", callback_data="pips")],
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="start_menu")],
+    ]
+    await _edit(query,
+        f"{'✅' if ok else '❌'} *{done_title}*\n\n{body}",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def pip_attach_go(query, context, pip_id, server_id):
+    await _run_ip_job(
+        query, context,
+        lambda cb: swap_primary_ip(server_id, pip_id, progress_callback=cb),
+        "IP swap",
+    )
+
+
+async def pip_detach_go(query, context, pip_id):
+    pips = await hetzner_api.list_primary_ips()
+    pip = next((p for p in pips if p["id"] == pip_id), None)
+    if not pip or not pip.get("assignee_id"):
+        await _edit(query, "⚠️ That IP is not on a server.")
+        return
+    await _run_ip_job(
+        query, context,
+        lambda cb: detach_primary_ip(pip["assignee_id"], pip_id, progress_callback=cb),
+        "IP detached",
+    )
 
 
 async def ip_delete_confirm(query, context, kind):

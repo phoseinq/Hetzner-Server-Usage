@@ -187,6 +187,16 @@ class HetznerAPI:
         # returns {} on success (204), None on failure
         return await self._request('DELETE', f'/primary_ips/{pip_id}')
 
+    async def assign_primary_ip(self, pip_id, server_id):
+        # the server has to be powered off, or this is 422 server_not_stopped
+        return await self._request('POST', f'/primary_ips/{pip_id}/actions/assign', {
+            'assignee_id': server_id,
+            'assignee_type': 'server',
+        })
+
+    async def unassign_primary_ip(self, pip_id):
+        return await self._request('POST', f'/primary_ips/{pip_id}/actions/unassign', {})
+
     async def list_locations(self):
         result = await self._request('GET', '/locations')
         return result.get('locations', []) if result else []
