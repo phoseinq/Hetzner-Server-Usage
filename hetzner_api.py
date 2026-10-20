@@ -32,6 +32,9 @@ class HetznerAPI:
         self._throttle_lock = asyncio.Lock()
         self._last_request = 0.0
         self._cache = {}
+        # ponytail: single slot, last error wins -- read it straight after the
+        # call that failed, before anything else touches this client
+        self.last_error = {}
 
     def _cache_get(self, endpoint):
         hit = self._cache.get(endpoint)
@@ -81,6 +84,7 @@ class HetznerAPI:
                             result = {}
                         if response.status >= 400:
                             logger.error(f"API Error {response.status}: {result}")
+                            self.last_error = (result or {}).get('error') or {}
                             return None
                         result = result if result is not None else {}
                         if method == 'GET':

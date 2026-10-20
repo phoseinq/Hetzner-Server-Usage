@@ -6,9 +6,14 @@ from utils import overage_cost, location_name, type_family, type_price
 
 logger = logging.getLogger(__name__)
 
+# Coming back there is only one plan that will do, so a datacenter with no room
+# for it is waited out rather than worked around.
+DOWNGRADE_ATTEMPTS = 6
+DOWNGRADE_GAP = 30
 
-def pick_upgrade_type(types, current, location):
-    """Cheapest plan to pass through on the way to resetting the counter.
+
+def pick_upgrade_types(types, current, location):
+    """Plans to pass through on the way to resetting the counter, cheapest first.
 
     The target has to be at least as big as the current plan in every
     dimension, disk included: the change runs with upgrade_disk=False so the
@@ -33,16 +38,36 @@ def pick_upgrade_type(types, current, location):
         and not t.get('deprecation')
         and bigger(t)
     ]
-    if not candidates:
-        return None
     family = type_family(current.get('name', ''))
-    same_family = [t for t in candidates if type_family(t.get('name', '')) == family]
-    return min(same_family or candidates, key=lambda t: type_price(t, location))
+    candidates.sort(key=lambda t: (type_family(t.get('name', '')) != family,
+                                   type_price(t, location)))
+    return candidates
 
 
-async def _upgrade_target(server):
+async def _upgrade_targets(server):
     types = await hetzner_api.get_server_types()
-    return pick_upgrade_type(types, server.get('server_type', {}), location_name(server))
+    return pick_upgrade_types(types, server.get('server_type', {}), location_name(server))
+
+
+def _api_error(default='Unknown error'):
+    """Why the last call failed. _request returns None, the reason lands here."""
+    return (getattr(hetzner_api, 'last_error', None) or {}).get('message', default)
+
+
+async def _start_again(server_id, was_running, add_log):
+    """A failed resize must not leave the server sitting powered off."""
+    if not was_running:
+        return
+    server = await hetzner_api.get_server(server_id, fresh=True)
+    if server and server.get('status') == 'running':
+        return
+    await add_log("🟢", "Starting the server again...")
+    await hetzner_api.power_on(server_id)
+    if await hetzner_api.wait_for_status(server_id, "running", max_attempts=40):
+        await add_log("✅", "Server is RUNNING again")
+    else:
+        await add_log("⚠️", "Could not confirm the server came back up -- check it")
+
 
 async def reset_server_traffic(server_id, progress_callback=None):
     logs = []
@@ -69,14 +94,13 @@ async def reset_server_traffic(server_id, progress_callback=None):
         
         await add_log("💾", f"Current plan: {current_type}")
         
-        target = await _upgrade_target(server)
+        targets = await _upgrade_targets(server)
 
-        if not target:
+        if not targets:
             await add_log("❌", f"No larger plan to bounce through for {current_type}")
             return False, logs
 
-        upgrade_type = target["name"]
-        await add_log("🔼", f"Upgrade plan selected: {upgrade_type}")
+        await add_log("🔼", f"Upgrade plan selected: {targets[0]['name']}")
 
         # resetting the counter is what stops Hetzner billing the overage, so
         # settle it now: it leaves this month's bill and is recorded as saved
@@ -99,11 +123,20 @@ async def reset_server_traffic(server_id, progress_callback=None):
             await add_log("✅", "Server is now OFF")
             await asyncio.sleep(2)
         
-        await add_log("🔼", f"Upgrading to {upgrade_type}...")
-        result = await hetzner_api.change_server_type(server_id, upgrade_type, upgrade_disk=False)
-        
-        if not result or (result.get('error')):
-            await add_log("❌", f"Upgrade request failed: {result.get('error', {}).get('message', 'Unknown error')}")
+        # Hetzner refuses a resize into a plan its datacenter has no room for
+        # (412 resource_unavailable), so walk down the list until one is taken.
+        upgrade_type = None
+        for candidate in targets:
+            name = candidate["name"]
+            await add_log("🔼", f"Upgrading to {name}...")
+            if await hetzner_api.change_server_type(server_id, name, upgrade_disk=False):
+                upgrade_type = name
+                break
+            await add_log("⚠️", f"{name} unavailable: {_api_error()}")
+
+        if not upgrade_type:
+            await add_log("❌", "No plan with free capacity to bounce through")
+            await _start_again(server_id, current_status == "running", add_log)
             return False, logs
         
         await asyncio.sleep(5)
@@ -139,10 +172,20 @@ async def reset_server_traffic(server_id, progress_callback=None):
         
         await asyncio.sleep(2)
         
-        result = await hetzner_api.change_server_type(server_id, current_type, upgrade_disk=False)
-        
-        if not result or (result.get('error')):
-            await add_log("❌", f"Downgrade request failed: {result.get('error', {}).get('message', 'Unknown error')}")
+        result = None
+        for attempt in range(1, DOWNGRADE_ATTEMPTS + 1):
+            result = await hetzner_api.change_server_type(server_id, current_type, upgrade_disk=False)
+            if result:
+                break
+            await add_log("⚠️", f"{current_type} refused "
+                                f"({attempt}/{DOWNGRADE_ATTEMPTS}): {_api_error()}")
+            if attempt < DOWNGRADE_ATTEMPTS:
+                await asyncio.sleep(DOWNGRADE_GAP)
+
+        if not result:
+            await add_log("❌", f"Could not get back to {current_type} — "
+                                f"the server is left on {upgrade_type}, retry later")
+            await _start_again(server_id, True, add_log)
             return False, logs
         
         await asyncio.sleep(5)
@@ -173,6 +216,10 @@ async def reset_server_traffic(server_id, progress_callback=None):
     except Exception as e:
         logger.error(f"Error during traffic reset: {e}")
         await add_log("❌", f"Unexpected error: {str(e)}")
+        try:
+            await _start_again(server_id, True, add_log)
+        except Exception as recover_error:
+            logger.error(f"Could not start the server again: {recover_error}")
         return False, logs
 
 
@@ -313,7 +360,8 @@ def demo():
         t('old99', 16, 32, 360, 1.00, dep={'announced': 'x'}),
     ]
     by = {x['name']: x for x in TYPES}
-    pick = lambda n: (pick_upgrade_type(TYPES, by[n], 'hel1') or {}).get('name')
+    picks = lambda n: [t['name'] for t in pick_upgrade_types(TYPES, by[n], 'hel1')]
+    pick = lambda n: (picks(n) or [None])[0]
 
     # the family that could not reset at all before
     assert pick('cpx22') == 'cpx32', pick('cpx22')
@@ -332,10 +380,21 @@ def demo():
     # the cheapest step up, not just any
     assert pick('cx23') != 'cx43'
     # nothing bigger => the caller is told, rather than picking something wrong
-    assert pick_upgrade_type(TYPES, by['cpx42'], 'hel1') is None
+    assert pick_upgrade_types(TYPES, by['cpx42'], 'hel1') == []
 
     # the choice depends on the type list alone, nothing per-datacenter
-    assert 'available' not in pick_upgrade_type.__code__.co_varnames
+    assert 'available' not in pick_upgrade_types.__code__.co_varnames
+
+    # a datacenter with no room for the first plan is not the end of the run:
+    # the rest follow, AMD included, with the same family still tried first
+    assert picks('cx33') == ['cx43', 'cpx42'], picks('cx33')
+    assert picks('cpx22') == ['cpx32', 'cpx42', 'cx33', 'cx43'], picks('cpx22')
+    for name in ('cx33', 'cpx22', 'cax11'):
+        cur = by[name]
+        for chosen in (by[c] for c in picks(name)):
+            assert chosen['disk'] >= cur['disk'], f"{name}: disk would shrink"
+            assert chosen['architecture'] == cur['architecture']
+            assert not chosen['deprecation']
 
     _swap_demo()
     print('server_manager demo OK')
