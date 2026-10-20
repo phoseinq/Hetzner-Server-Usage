@@ -10,13 +10,13 @@ from telegram.ext import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import Config
-from handlers import (
+from bot.config import Config
+from bot.handlers import (
     start_handler, button_handler, _start_console,
     price_ask, price_recv, price_cancel, price_clear, WAIT_PRICE,
 )
-from monitor import traffic_monitor
-from shell_handler import (
+from bot.monitor import traffic_monitor
+from bot.shell_handler import (
     recv_port, recv_user, recv_auth_type,
     recv_password, recv_key, recv_command,
     console_cancel, console_disconnect,

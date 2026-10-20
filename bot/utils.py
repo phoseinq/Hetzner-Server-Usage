@@ -1,4 +1,4 @@
-from config import Config
+from .config import Config
 
 # Hetzner location codes -> ISO country, for the few places where only the
 # bare code is known (datacenter names like "nbg1-dc3"). Objects returned by

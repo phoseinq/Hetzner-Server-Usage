@@ -184,19 +184,21 @@ The bot checks traffic **every hour** automatically:
 ### 📁 Project Structure
 
 ```
-├── main.py              Entry point
-├── config.py            Config & env loader
-├── handlers.py          Telegram button handlers
-├── shell_handler.py     SSH console logic
-├── hetzner_api.py       Hetzner Cloud API client
-├── server_manager.py    Traffic reset logic
-├── monitor.py           Hourly traffic monitor
-├── overage_tracker.py   Cost history tracker
-├── price_store.py       Manual per-server price overrides
-├── utils.py             Helper functions
-├── install.sh           One-command installer (systemd)
-├── hetzner-bot.service  systemd unit template
-└── .env.example         Environment template
+├── main.py                  Entry point
+├── bot/
+│   ├── config.py            Config & env loader
+│   ├── handlers.py          Telegram button handlers
+│   ├── shell_handler.py     SSH console logic
+│   ├── hetzner_api.py       Hetzner Cloud API client
+│   ├── server_manager.py    Traffic reset logic
+│   ├── monitor.py           Hourly traffic monitor
+│   ├── overage_tracker.py   Cost history tracker
+│   ├── price_store.py       Manual per-server price overrides
+│   └── utils.py             Helper functions
+├── install.sh               One-command installer (systemd)
+├── hetzner-bot.sh           The `hetzner` command
+├── hetzner-bot.service      systemd unit template
+└── .env.example             Environment template
 ```
 
 ---
@@ -391,18 +393,21 @@ hetzner uninstall    # حذف سرویس (قبل از حذف دیتا می‌پ�
 ### 📁 ساختار پروژه
 
 ```
-├── main.py              نقطه شروع
-├── config.py            مدیریت تنظیمات
-├── handlers.py          هندلر دکمه‌های تلگرام
-├── shell_handler.py     لاجیک کنسول SSH
-├── hetzner_api.py       کلاینت API هتزنر
-├── server_manager.py    لاجیک ریست ترافیک
-├── monitor.py           مانیتور ساعتی ترافیک
-├── overage_tracker.py   ردیاب تاریخچه هزینه
-├── utils.py             توابع کمکی
-├── install.sh           نصب یک‌مرحله‌ای (systemd)
-├── hetzner-bot.service  قالب سرویس systemd
-└── .env.example         نمونه فایل تنظیمات
+├── main.py                  نقطه شروع
+├── bot/
+│   ├── config.py            مدیریت تنظیمات
+│   ├── handlers.py          هندلر دکمه‌های تلگرام
+│   ├── shell_handler.py     لاجیک کنسول SSH
+│   ├── hetzner_api.py       کلاینت API هتزنر
+│   ├── server_manager.py    لاجیک ریست ترافیک
+│   ├── monitor.py           مانیتور ساعتی ترافیک
+│   ├── overage_tracker.py   ردیاب تاریخچه هزینه
+│   ├── price_store.py       قیمت دستی هر سرور
+│   └── utils.py             توابع کمکی
+├── install.sh               نصب یک‌مرحله‌ای (systemd)
+├── hetzner-bot.sh           دستور `hetzner`
+├── hetzner-bot.service      قالب سرویس systemd
+└── .env.example             نمونه فایل تنظیمات
 ```
 
 ---

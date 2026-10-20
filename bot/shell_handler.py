@@ -6,7 +6,7 @@ import paramiko
 from io import StringIO
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, CallbackQueryHandler, filters
-from config import Config
+from .config import Config
 
 logger = logging.getLogger(__name__)
 

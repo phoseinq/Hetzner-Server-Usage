@@ -24,7 +24,7 @@ jobs:
         run: python -m compileall -q .
       - name: Self-checks
         run: |
-          python utils.py
-          python price_store.py
-          python overage_tracker.py
-          python server_manager.py
+          python -m bot.utils
+          python -m bot.price_store
+          python -m bot.overage_tracker
+          python -m bot.server_manager
