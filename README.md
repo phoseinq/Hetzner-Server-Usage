@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/header.jpg" alt="Hetzner Server Manager Bot" width="100%">
+
 # 🖥️ Hetzner Server Manager Bot
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
