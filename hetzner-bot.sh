@@ -67,7 +67,14 @@ do_update() {
     fi
     cd "$DIR" || return
     echo "⬇️  Pulling latest version..."
-    git pull
+    git fetch --tags --force --prune origin
+    # A plain pull cannot fast-forward once history has been rewritten upstream,
+    # and it would leave the install stuck on an old commit for good. Take what
+    # origin has instead; .env and the data files are untracked and stay put.
+    if ! git merge --ff-only origin/main >/dev/null 2>&1; then
+        echo -e "${YELLOW}Upstream history moved — resetting this copy to origin/main.${PLAIN}"
+        git reset --hard origin/main
+    fi
     ./venv/bin/pip install --quiet -r requirements.txt
     # keep the service unit in sync with the repo template,
     # preserving the timezone the user picked with `hetzner tz`
