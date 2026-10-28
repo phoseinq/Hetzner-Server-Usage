@@ -16,7 +16,6 @@ LONG_TTL_PREFIXES = {
     '/pricing': 3600,
     '/locations': 3600,
     '/server_types': 3600,
-    '/datacenters': 600,
     '/images?type=system': 3600,
 }
 RATE_LIMIT_SOFT_FLOOR = 200         # slow down when fewer requests remain
@@ -204,15 +203,6 @@ class HetznerAPI:
     async def list_locations(self):
         result = await self._request('GET', '/locations')
         return result.get('locations', []) if result else []
-
-    async def list_datacenters(self):
-        result = await self._request('GET', '/datacenters?per_page=50')
-        return result.get('datacenters', []) if result else []
-
-    async def get_datacenter(self, dc_name):
-        result = await self._request('GET', f'/datacenters?name={dc_name}')
-        dcs = result.get('datacenters', []) if result else []
-        return dcs[0] if dcs else None
 
     async def rebuild_server(self, server_id, image):
         return await self._request('POST', f'/servers/{server_id}/actions/rebuild', {

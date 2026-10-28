@@ -10,9 +10,9 @@ from .hetzner_api import hetzner_api, set_account, account_count, account_name, 
 from .utils import (
     format_traffic, get_traffic_emoji, get_location_info,
     get_location, location_name, traffic_limit_tb,
-    traffic_price_per_tb, overage_cost, type_family, type_price,
+    traffic_price_per_tb, overage_cost, type_family, type_price, type_available_at,
 )
-from .server_manager import reset_server_traffic, swap_primary_ip, detach_primary_ip
+from .server_manager import reset_server_traffic, swap_primary_ip, detach_primary_ip, _api_error
 from .overage_tracker import overage_tracker
 from .price_store import price_store
 from .shell_handler import console_entry, active_sessions
@@ -1079,36 +1079,17 @@ _type_family = type_family
 _type_price = type_price
 
 
-async def _server_datacenter(server):
-    """The datacenter a server sits in.
-
-    Server objects no longer carry a `datacenter` field, so the datacenter is
-    matched by location instead (falling back to the old field when present).
-    """
-    dc_name = (server.get("datacenter") or {}).get("name", "")
-    if dc_name:
-        return await hetzner_api.get_datacenter(dc_name)
-    loc = location_name(server)
-    if not loc:
-        return None
-    dcs = await hetzner_api.list_datacenters()
-    return next((dc for dc in dcs if dc.get("location", {}).get("name") == loc), None)
-
-
 async def _resize_candidates(server):
     """Every plan this server can be moved to.
 
     Filtered on what actually blocks a change: architecture has to match, or
     the disk image would not boot, and a deprecated plan cannot be a target.
-    The datacenter's migration list is read for labelling only — plans
-    outside it are flagged for the caller, not removed.
+    Whether the location has room for a plan is read for labelling only —
+    a resize stays on the server's own host, so it can work while new
+    servers of that plan cannot be placed; those plans are flagged, not removed.
     """
-    types, dc = await asyncio.gather(
-        hetzner_api.get_server_types(),
-        _server_datacenter(server),
-    )
-    st = (dc or {}).get("server_types", {})
-    listed = set(st.get("available_for_migration") or st.get("available") or [])
+    types = await hetzner_api.get_server_types()
+    loc = location_name(server)
     cur = server.get("server_type", {})
     candidates = [
         t for t in types
@@ -1117,7 +1098,7 @@ async def _resize_candidates(server):
         and t.get("name") != cur.get("name")
     ]
     for t in candidates:
-        t["_listed"] = t.get("id") in listed
+        t["_listed"] = type_available_at(t, loc)
     return candidates
 
 
@@ -1160,7 +1141,7 @@ async def resize_pick_family(query, context, server_id):
         f"Server: `{server.get('name')}`\n"
         f"Current: `{cur.get('name')}` ({cur.get('cores')}C / {cur.get('memory'):.0f}GB / {cur.get('disk')}GB)\n\n"
         f"Choose a CPU family — every plan is offered, including the ones this "
-        f"datacenter does not normally list:",
+        f"location has no room for right now:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
@@ -1189,7 +1170,7 @@ async def resize_pick_type(query, context, server_id, family):
     keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data=f"resize_{server_id}")])
     legend = ""
     if any_unlisted:
-        legend += "\n🔓 outside this datacenter's usual list"
+        legend += "\n🔓 sold out here for new servers — a resize may still fit"
     if any_small_disk:
         legend += "\n💾 smaller disk than the server has now — Hetzner will refuse this one"
     await _edit(query,
@@ -1206,7 +1187,7 @@ async def resize_confirm(query, context, server_id, new_type_name):
     if not server:
         await _edit(query, "⚠️ Server not found or API error.")
         return
-    # from the candidate list, so the datacenter-listing flag comes with it
+    # from the candidate list, so the availability flag comes with it
     new_type = next(
         (t for t in await _resize_candidates(server) if t.get("name") == new_type_name), None
     )
@@ -1225,7 +1206,9 @@ async def resize_confirm(query, context, server_id, new_type_name):
         f"⚠️ The server will be powered off during the change.\n"
     )
     if not new_type.get("_listed"):
-        text += "\n🔓 This plan is outside this datacenter's usual list.\n"
+        text += ("\n🔓 This location has no room for new servers of this plan right now. "
+                 "A resize stays on the server's host, so it may still work — if not, "
+                 "Hetzner answers resource\\_unavailable and nothing changes.\n")
     if (new_type.get("disk", 0) or 0) < (cur.get("disk", 0) or 0):
         text += (
             "\n💾 This plan's disk is smaller than the server's. Hetzner refuses "
@@ -1272,8 +1255,16 @@ async def resize_go(query, context, server_id, new_type_name, upgrade_disk):
     await log(f"⚖️ Switching to `{new_type_name}`{' (with disk upgrade)' if upgrade_disk else ''}...")
     result = await hetzner_api.change_server_type(server_id, new_type_name, upgrade_disk=upgrade_disk)
     if not result or result.get("error"):
-        msg = (result or {}).get("error", {}).get("message", "Unknown error")
+        # _request returns None on an HTTP error; the reason is in last_error
+        msg = (result or {}).get("error", {}).get("message") or _api_error()
+        if (getattr(hetzner_api, "last_error", None) or {}).get("code") == "resource_unavailable":
+            msg += " — Hetzner has no room for this plan on the server's host right now; try again later or pick another plan"
         await log(f"❌ Change failed: {msg}")
+        if was_running:
+            await log("🟢 Powering server back on...")
+            await hetzner_api.power_on(server_id)
+            await hetzner_api.wait_for_status(server_id, "running", max_attempts=40)
+            await log("✅ Server is RUNNING")
         return
 
     for _ in range(30):

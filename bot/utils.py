@@ -32,6 +32,19 @@ def location_name(obj):
     return get_location(obj).get('name', '')
 
 
+def type_available_at(server_type, loc):
+    """Whether Hetzner currently has room to place this plan in `loc`.
+
+    The per-datacenter lists (GET /datacenters) were removed in 2026-06; the
+    same answer now sits on the type itself, in `locations[].available`. It
+    covers new placements only — an existing server can still fit on its host.
+    """
+    for entry in server_type.get('locations') or []:
+        if entry.get('name') == loc:
+            return bool(entry.get('available'))
+    return False
+
+
 def country_flag(country_code):
     code = (country_code or '').strip().upper()
     if len(code) != 2 or not code.isalpha():
@@ -147,6 +160,12 @@ def demo():
     # bare code, e.g. from a datacenter name
     assert get_location_info('hel1') == ('HEL1', '🇫🇮')
     assert get_location_info('') == ('Unknown', '🏳️')
+    # plan room per location comes from the type, not from /datacenters
+    cx33 = {'locations': [{'name': 'hel1', 'available': False}, {'name': 'fsn1', 'available': True}]}
+    assert type_available_at(cx33, 'fsn1') is True
+    assert type_available_at(cx33, 'hel1') is False
+    assert type_available_at(cx33, 'sin') is False
+    assert type_available_at({}, 'hel1') is False
     # per-server included traffic wins over the global default
     assert traffic_limit_tb({'included_traffic': 1024 ** 4}) == 1
     assert traffic_limit_tb({}) == Config.TRAFFIC_LIMIT_TB
