@@ -12,7 +12,8 @@ from .utils import (
     get_location, location_name, traffic_limit_tb,
     traffic_price_per_tb, overage_cost, type_family, type_price, type_available_at,
 )
-from .server_manager import reset_server_traffic, swap_primary_ip, detach_primary_ip, _api_error
+from .server_manager import (reset_server_traffic, swap_primary_ip, detach_primary_ip, _api_error,
+                             DOWNGRADE_ATTEMPTS as PLACEMENT_ATTEMPTS, DOWNGRADE_GAP as PLACEMENT_GAP)
 from .overage_tracker import overage_tracker
 from .price_store import price_store
 from .shell_handler import console_entry, active_sessions
@@ -1260,12 +1261,27 @@ async def resize_go(query, context, server_id, new_type_name, upgrade_disk):
         await log("✅ Server is OFF")
 
     await log(f"⚖️ Switching to `{new_type_name}`{' (with disk upgrade)' if upgrade_disk else ''}...")
-    result = await hetzner_api.change_server_type(server_id, new_type_name, upgrade_disk=upgrade_disk)
-    if not result or result.get("error"):
+    # A resize runs on the server's own host, so "no room" is about this minute, not this plan:
+    # the traffic reset has always waited it out, and Change Plan used to give up on the first
+    # refusal. It now keeps asking, and only for a placement refusal — a disk that is too small
+    # or a type that does not exist says the same thing however long you wait.
+    result, msg = None, ""
+    for attempt in range(1, PLACEMENT_ATTEMPTS + 1):
+        result = await hetzner_api.change_server_type(server_id, new_type_name, upgrade_disk=upgrade_disk)
+        if result and not result.get("error"):
+            break
         # _request returns None on an HTTP error; the reason is in last_error
         msg = (result or {}).get("error", {}).get("message") or _api_error()
-        if (getattr(hetzner_api, "last_error", None) or {}).get("code") == "resource_unavailable":
-            msg += " — Hetzner has no room for this plan on the server's host right now; try again later or pick another plan"
+        result = None
+        if (getattr(hetzner_api, "last_error", None) or {}).get("code") != "resource_unavailable":
+            break
+        if attempt == PLACEMENT_ATTEMPTS:
+            msg += (f" — the host stayed full for all {PLACEMENT_ATTEMPTS} tries; "
+                    f"try again later or pick another plan")
+            break
+        await log(f"⏳ Host is full ({attempt}/{PLACEMENT_ATTEMPTS}) — waiting {PLACEMENT_GAP}s, then asking again...")
+        await asyncio.sleep(PLACEMENT_GAP)
+    if not result:
         await log(f"❌ Change failed: {msg}")
         if was_running:
             await log("🟢 Powering server back on...")
