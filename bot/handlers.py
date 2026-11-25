@@ -191,6 +191,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("fipnewc_"):
         _, ip_type, place, count = data.split("_")
         await ip_create(query, context, "fip", ip_type, place, int(count))
+    elif data.startswith("fipats_"):
+        _, fid, sid = data.split("_")
+        await server_fip_assign(query, context, int(fid), int(sid), back="fips")
+    elif data.startswith("fipatt_"):
+        await fip_attach_pick(query, context, int(data.split("_")[1]))
+    elif data.startswith("fipdet_"):
+        await fip_detach_from_list(query, context, int(data.split("_")[1]))
     elif data.startswith("fiptog_"):
         await ip_toggle(query, context, "fip", int(data.split("_")[1]))
     elif data == "fipdelsel_yes":
@@ -1454,18 +1461,107 @@ async def show_server_fips(query, context, server_id):
     await _edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
-async def server_fip_assign(query, context, fip_id, server_id):
+def _fip_setup(fip, attach=True):
+    """What still has to be run on the server itself.
+
+    Hetzner routes a floating IP to the server but never configures it inside: until the
+    address is on the interface the server answers on its primary IP as before, which is
+    what makes an attach look like it did nothing.
+    """
+    ip = fip.get("ip")
+    if not ip:
+        return ""
+    prefix = "32" if fip.get("type") == "ipv4" else "64"
+    if not attach:
+        return (f"\n\nOn the server, drop it again:\n"
+                f"`ip addr del {ip}/{prefix} dev eth0`\n"
+                f"and remove it from the netplan file if you added it there.")
+    return (
+        f"\n\n*Run this on the server* — until you do, nothing answers on it:\n"
+        f"`ip addr add {ip}/{prefix} dev eth0`\n\n"
+        f"To keep it across a reboot, in `/etc/netplan/50-cloud-init.yaml` under "
+        f"`ethernets: eth0:` add:\n"
+        f"`addresses:`\n`  - {ip}/{prefix}`\n"
+        f"then `netplan apply`."
+    )
+
+
+async def server_fip_assign(query, context, fip_id, server_id, back=None):
     await _edit(query, "🔗 Attaching floating IP...")
-    await hetzner_api.assign_floating_ip(fip_id, server_id)
+    result = await hetzner_api.assign_floating_ip(fip_id, server_id)
+    if not result:
+        await _edit(query, f"⚠️ Could not attach it: {_api_error()}",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("⬅️ Back", callback_data=back or f"srvfip_{server_id}")]]))
+        return
     await asyncio.sleep(2)
-    await show_server_fips(query, context, server_id)
+    fips, server = await asyncio.gather(hetzner_api.list_floating_ips(),
+                                        hetzner_api.get_server(server_id))
+    fip = next((f for f in fips if f["id"] == fip_id), {})
+    name = (server or {}).get("name", server_id)
+    await _edit(query,
+        f"✅ `{fip.get('ip')}` is now routed to `{name}`." + _fip_setup(fip),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌐 Floating IPs of this server", callback_data=f"srvfip_{server_id}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data=back or f"srvfip_{server_id}")],
+        ]),
+        parse_mode="Markdown",
+    )
 
 
-async def server_fip_unassign(query, context, fip_id, server_id):
+async def server_fip_unassign(query, context, fip_id, server_id, back=None):
     await _edit(query, "🔌 Detaching floating IP...")
-    await hetzner_api.unassign_floating_ip(fip_id)
+    fips = await hetzner_api.list_floating_ips()
+    fip = next((f for f in fips if f["id"] == fip_id), {})
+    result = await hetzner_api.unassign_floating_ip(fip_id)
+    if not result:
+        await _edit(query, f"⚠️ Could not detach it: {_api_error()}",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("⬅️ Back", callback_data=back or f"srvfip_{server_id}")]]))
+        return
     await asyncio.sleep(2)
-    await show_server_fips(query, context, server_id)
+    await _edit(query,
+        f"✅ `{fip.get('ip')}` is detached." + _fip_setup(fip, attach=False),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Back", callback_data=back or f"srvfip_{server_id}")],
+        ]),
+        parse_mode="Markdown",
+    )
+
+
+async def fip_attach_pick(query, context, fip_id):
+    """Which server to route it to. A floating IP may sit on a server in any location."""
+    fips, servers = await asyncio.gather(hetzner_api.list_floating_ips(),
+                                         hetzner_api.list_servers())
+    fip = next((f for f in fips if f["id"] == fip_id), None)
+    if not fip:
+        await _edit(query, "⚠️ IP not found.")
+        return
+    loc_name, flag = get_location_info(_ip_location_name("fip", fip))
+    keyboard = [
+        [InlineKeyboardButton(
+            f"🖥 {s.get('name')} — {get_location_info(location_name(s))[0]}",
+            callback_data=f"fipats_{fip_id}_{s['id']}",
+        )]
+        for s in servers
+    ]
+    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="fips")])
+    body = "Choose the server to route it to:" if servers else "No servers in this account."
+    await _edit(query,
+        f"📎 *Attach* `{fip.get('ip')}`\n\n"
+        f"{flag} home {loc_name} | `{fip.get('type')}`\n\n{body}",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def fip_detach_from_list(query, context, fip_id):
+    fips = await hetzner_api.list_floating_ips()
+    fip = next((f for f in fips if f["id"] == fip_id), None)
+    if not fip:
+        await _edit(query, "⚠️ IP not found.")
+        return
+    await server_fip_unassign(query, context, fip_id, fip.get("server") or 0, back="fips")
 
 
 async def backup_toggle_confirm(query, context, server_id):
@@ -1568,11 +1664,10 @@ async def show_ip_list(query, context, kind):
                 f"{'✅' if ip['id'] in sel else '⬜'} {ip.get('ip')}",
                 callback_data=f"{kind}tog_{ip['id']}",
             )]
-            if kind == "pip":
-                row.append(InlineKeyboardButton(
-                    "✂️ Detach" if aid else "📎 Attach",
-                    callback_data=f"pipdet_{ip['id']}" if aid else f"pipatt_{ip['id']}",
-                ))
+            row.append(InlineKeyboardButton(
+                "✂️ Detach" if aid else "📎 Attach",
+                callback_data=f"{kind}det_{ip['id']}" if aid else f"{kind}att_{ip['id']}",
+            ))
             keyboard.append(row)
         text += f"\nTotal: {len(ips)} | €{total_cost:.2f}/month\n"
         text += "\nTap IPs to select them, then delete together."
